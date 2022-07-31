@@ -21,11 +21,12 @@ import (
 	//	"bytes"
 	"sync"
 	"sync/atomic"
-
 	//	"6.824/labgob"
 	"6.824/labrpc"
 )
 
+// LogType describes various types of log entries.
+type LogType uint8
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,10 +51,24 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
+	// currentTerm commitIndex, lastApplied,  must be kept at the top of
+	// the struct so they're 64 bit aligned which is a requirement for
+	// atomic ops on 32 bit platforms.
+
+	// The current term, cache of StableStore
+	currentTerm uint64
+
+	//volatile state on all servers
+	// Highest committed log entry
+	commitIndex uint64
+	// Last applied log to the FSM
+	lastApplied uint64
+
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
@@ -63,6 +78,12 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	votedFor int
+	log      []*Log
+
+	//volatile state on leaders
+	nextIndex  []int
+	matchIndex []int
 
 }
 
@@ -143,6 +164,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term uint64
+	CandidateId int
+	// Cache the latest log from LogStore
+	LastLogIndex uint64
+	LastLogTerm  uint64
 }
 
 //
@@ -151,6 +177,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term uint64
+	VoteGranted bool
 }
 
 //
@@ -158,6 +186,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
 }
 
 //
