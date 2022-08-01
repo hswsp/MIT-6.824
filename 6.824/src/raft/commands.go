@@ -10,7 +10,7 @@ type AppendEntriesRequest struct {
 	Term uint64
 
 	// RPC end points of leader
-	Leader    *labrpc.ClientEnd
+	Leader  *labrpc.ClientEnd
 
 	// Provide the previous entries for integrity checking
 	PrevLogIndex uint64

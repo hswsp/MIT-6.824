@@ -56,18 +56,7 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	// currentTerm commitIndex, lastApplied,  must be kept at the top of
-	// the struct so they're 64 bit aligned which is a requirement for
-	// atomic ops on 32 bit platforms.
-
-	// The current term, cache of StableStore
-	currentTerm uint64
-
-	//volatile state on all servers
-	// Highest committed log entry
-	commitIndex uint64
-	// Last applied log to the FSM
-	lastApplied uint64
+	raftState //OOP inherit
 
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -81,9 +70,8 @@ type Raft struct {
 	votedFor int
 	log      []*Log
 
-	//volatile state on leaders
-	nextIndex  []int
-	matchIndex []int
+	// leaderState used only while state is leader
+	leaderState LeaderState
 
 }
 
