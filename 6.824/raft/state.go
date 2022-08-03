@@ -50,8 +50,8 @@ type raftState struct {
 type LeaderState struct {
 
 	//volatile state on leaders
-	nextIndex  []int
-	matchIndex []int
+	nextIndex  []uint64
+	matchIndex []uint64
 }
 
 func (r *raftState) getState() RaftState {

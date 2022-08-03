@@ -18,6 +18,9 @@ package raft
 //
 
 import (
+	"github.com/hashicorp/go-hclog"
+	"time"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -25,8 +28,6 @@ import (
 	"6.824/labrpc"
 )
 
-// LogType describes various types of log entries.
-type LogType uint8
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -67,12 +68,41 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+
+	//candidateID that received vote in current term
 	votedFor int
-	log      []*Log
+	//each entry contains command for state machine
+	// and term when entry was received by leader
+	logs      []*Log
 
 	// leaderState used only while state is leader
 	leaderState LeaderState
 
+	// conf stores the current configuration to use. This is the most recent one
+	// provided. All reads of config values should use the config() helper method
+	// to read this safely.
+	conf atomic.Value
+
+
+	// lastContact is the last time we had contact from the
+	// leader node. This can be used to gauge staleness.
+	lastContact     *time.Ticker
+
+	// applyCh is used to async send logs to the main thread to
+	// be committed and applied to the FSM.
+	applyCh chan ApplyMsg
+
+	// stable is a StableStore implementation for durable state
+	// It provides stable storage for many fields in raftState
+	stable StableStore
+
+	// Used for our logging
+	logger hclog.Logger
+}
+
+func (r *Raft) config() Config {
+	// Since Load() returns an interface{} type, we need to cast it first
+	return r.conf.Load().(Config)
 }
 
 // return currentTerm and whether this server
@@ -82,6 +112,15 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer  rf.mu.Unlock()
+	term = int(rf.currentTerm)
+	rf.logger.Info("the peer[", rf.me, "] state is:", rf.state)
+	if rf.state == Leader{
+		isleader = true
+	}else{
+		isleader = false
+	}
 	return term, isleader
 }
 

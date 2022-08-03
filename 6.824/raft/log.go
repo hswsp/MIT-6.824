@@ -1,6 +1,17 @@
+/*
+ * @Author: hswsp hswsp@mail.ustc.edu.cn
+ * @Date: 2022-07-31 17:51:11
+ * @LastEditors: hswsp hswsp@mail.ustc.edu.cn
+ * @LastEditTime: 2022-08-03 16:01:10
+ * @FilePath: /src/raft/log.go
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
 package raft
 
 import "time"
+
+// LogType describes various types of log entries.
+type LogType uint8
 
 // Log entries are replicated to all members of the Raft cluster
 // and form the heart of the replicated state machine.
