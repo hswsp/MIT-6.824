@@ -1,8 +1,9 @@
 package raft
 
 import (
-	"github.com/hashicorp/go-hclog"
+	"fmt"
 	"io"
+	"os"
 	"time"
 )
 // ServerID is a unique string identifying a server for all time.
@@ -31,7 +32,6 @@ type Config struct {
 	// step down as leader.
 	LeaderLeaseTimeout time.Duration
 
-
 	// LocalID is a unique ID for this server across all time. When running with
 	// ProtocolVersion < 3, you must set this to be the same as the network
 	// address of your transport.
@@ -44,20 +44,32 @@ type Config struct {
 	// LogLevel represents a log level. If the value does not match a known
 	// logging level hclog.NoLevel is used.
 	LogLevel string
-
-	// Logger is a user-provided logger. If nil, a logger writing to
-	// LogOutput with LogLevel is used.
-	Logger hclog.Logger
 }
 
 // DefaultConfig returns a Config with usable defaults.
+//The paper's Section 5.2 mentions election timeouts in the range of 150 to 300 milliseconds.
+//Such a range only makes sense if the leader sends heartbeats considerably more often than once per 150 milliseconds.
+//the tester here limits you to 10 heartbeats per second,
+//you will have to use an election timeout larger than the paper's 150 to 300 milliseconds,
+// but not too large, because then you may fail to elect a leader within five seconds.
+// two recommended parameter settings:
+// a. ElectionTimeout: 150ms-300ms, HeartbeatTimeout: 50ms
+// b. ElectionTimeout: 200ms-400ms, HeartbeatTimeout: 100ms
+// ref: https://github.com/springfieldking/mit-6.824-golabs-2018/issues/1
 func DefaultConfig() *Config {
+	id := generateUUID()
+	file, err := os.Create("./debug.log")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	return &Config{
-
-		HeartbeatTimeout:   1000 * time.Millisecond,
-		ElectionTimeout:    1000 * time.Millisecond,
+		HeartbeatTimeout:   100 * time.Millisecond,
+		ElectionTimeout:    200 * time.Millisecond,
 		CommitTimeout:      50 * time.Millisecond,
-		LeaderLeaseTimeout: 500 * time.Millisecond,
+		LeaderLeaseTimeout: 50 * time.Millisecond,
 		LogLevel:           "DEBUG",
+		LocalID:            ServerID(id),
+		LogOutput:          file,
 	}
 }

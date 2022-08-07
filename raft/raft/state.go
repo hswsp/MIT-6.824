@@ -39,6 +39,17 @@ type raftState struct {
 	// Last applied log to the FSM
 	lastApplied uint64
 
+	// protects 4 next fields
+	lastLock sync.Mutex
+
+	// Cache the latest snapshot index/term
+	lastSnapshotIndex uint64
+	lastSnapshotTerm  uint64
+
+	// Cache the latest log from LogStore
+	lastLogIndex uint64
+	lastLogTerm  uint64
+
 	// Tracks running goroutines
 	routinesGroup sync.WaitGroup
 
@@ -80,6 +91,35 @@ func (r *raftState) setLastApplied(index uint64) {
 	atomic.StoreUint64(&r.lastApplied, index)
 }
 
+func (r *raftState) getLastLog() (index, term uint64) {
+	r.lastLock.Lock()
+	index = r.lastLogIndex
+	term = r.lastLogTerm
+	r.lastLock.Unlock()
+	return
+}
+
+func (r *raftState) setLastLog(index, term uint64) {
+	r.lastLock.Lock()
+	r.lastLogIndex = index
+	r.lastLogTerm = term
+	r.lastLock.Unlock()
+}
+
+func (r *raftState) getLastSnapshot() (index, term uint64) {
+	r.lastLock.Lock()
+	index = r.lastSnapshotIndex
+	term = r.lastSnapshotTerm
+	r.lastLock.Unlock()
+	return
+}
+
+func (r *raftState) setLastSnapshot(index, term uint64) {
+	r.lastLock.Lock()
+	r.lastSnapshotIndex = index
+	r.lastSnapshotTerm = term
+	r.lastLock.Unlock()
+}
 // Start a goroutine and properly handle the race between a routine
 // starting and incrementing, and exiting and decrementing.
 func (r *raftState) goFunc(f func()) {
@@ -93,3 +133,23 @@ func (r *raftState) goFunc(f func()) {
 func (r *raftState) waitShutdown() {
 	r.routinesGroup.Wait()
 }
+
+// getLastIndex returns the last index in stable storage.
+// Either from the last log or from the last snapshot.
+func (r *raftState) getLastIndex() uint64 {
+	r.lastLock.Lock()
+	defer r.lastLock.Unlock()
+	return max(r.lastLogIndex, r.lastSnapshotIndex)
+}
+
+// getLastEntry returns the last index and term in stable storage.
+// Either from the last log or from the last snapshot.
+func (r *raftState) getLastEntry() (uint64, uint64) {
+	r.lastLock.Lock()
+	defer r.lastLock.Unlock()
+	if r.lastLogIndex >= r.lastSnapshotIndex {
+		return r.lastLogIndex, r.lastLogTerm
+	}
+	return r.lastSnapshotIndex, r.lastSnapshotTerm
+}
+

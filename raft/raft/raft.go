@@ -70,10 +70,12 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	//candidateID that received vote in current term
-	votedFor int
+	// votedFor also represent LeaderID which is the current cluster leader ID
+	votedFor int32
+
 	//each entry contains command for state machine
 	// and term when entry was received by leader
-	logs      []*Log
+	logs      []Log
 
 	// leaderState used only while state is leader
 	leaderState LeaderState
@@ -86,7 +88,15 @@ type Raft struct {
 
 	// lastContact is the last time we had contact from the
 	// leader node. This can be used to gauge staleness.
-	lastContact     *time.Ticker
+	lastContact     time.Time
+	lastContactLock sync.RWMutex
+
+	// RPC chan comes from the transport layer
+	rpcCh <-chan RPC
+
+	// Shutdown channel to exit, protected to prevent concurrent exits
+	shutdownCh   chan struct{}
+	shutdownLock sync.Mutex
 
 	// applyCh is used to async send logs to the main thread to
 	// be committed and applied to the FSM.
@@ -97,12 +107,40 @@ type Raft struct {
 	stable StableStore
 
 	// Used for our logging
+	// Logger is a user-provided logger. If nil, a logger writing to
+	// LogOutput with LogLevel is used.
 	logger hclog.Logger
 }
 
 func (r *Raft) config() Config {
 	// Since Load() returns an interface{} type, we need to cast it first
 	return r.conf.Load().(Config)
+}
+
+// LastContact returns the time of last contact by a leader.
+// This only makes sense if we are currently a follower.
+func (r *Raft) LastContact() time.Time {
+	r.lastContactLock.RLock()
+	last := r.lastContact
+	r.lastContactLock.RUnlock()
+	return last
+}
+
+// setLastContact is used to set the last contact time to now
+func (r *Raft) setLastContact() {
+	r.lastContactLock.Lock()
+	r.lastContact = time.Now()
+	r.lastContactLock.Unlock()
+}
+
+func (r *Raft) getLeader() int32 {
+	stateAddr := &r.votedFor
+	return atomic.LoadInt32(stateAddr)
+}
+
+func (r *Raft) setLeader(s int32) {
+	stateAddr := &r.votedFor
+	atomic.StoreInt32(stateAddr, s)
 }
 
 // return currentTerm and whether this server
@@ -184,7 +222,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -192,7 +229,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term uint64
-	CandidateId int
+	CandidateId int32
 	// Cache the latest log from LogStore
 	LastLogIndex uint64
 	LastLogTerm  uint64
@@ -206,13 +243,95 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term uint64
 	VoteGranted bool
+	voterID ServerID
 }
 
 //
 // example RequestVote RPC handler.
-//
+// requestVote is invoked when we get a request vote RPC call.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	// current node crash
+	if rf.killed() {
+		reply.Term = 0
+		reply.VoteGranted = false
+		return
+	}
+	candidate := args.CandidateId
+	rf.logger.Info("Server[", rf.me,"]: got RequestVote from candidate ",args.CandidateId,
+		", args: ", args,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs,"\n")
+	//reason: A network partition occurs, the candidate has OutOfDate
+	if args.Term < rf.getCurrentTerm() {
+		reply.Term = rf.getCurrentTerm()
+		reply.VoteGranted = false
+		rf.logger.Debug("======= server %d got RequestVote from candidate %d, args: %+v, current log: %v, reply: %+v =======\n", rf.me, args.CandidateId, args, rf.logs, reply)
+		return
+	}
+
+	reply.Term = args.Term
+	// Increase the term if we see a newer one
+	if args.Term > rf.getCurrentTerm() {
+		// Ensure transition to follower
+		rf.logger.Debug("lost leadership because received a requestVote with a newer term")
+		rf.setState(Follower)
+		rf.setCurrentTerm(args.Term)
+	}
+	voteFor := rf.getLeader()
+	// Check if we've voted in this election before
+	if args.Term == rf.getCurrentTerm() && voteFor != -1 && voteFor != args.CandidateId{
+		rf.logger.Info("duplicate requestVote for same term", "term", args.Term)
+		reply.VoteGranted = false
+		return
+	}
+	// Reject if their term is older
+	lastIdx, lastTerm := rf.getLastEntry()
+	if lastTerm > args.LastLogTerm {
+		rf.logger.Warn("rejecting vote request since our last term is greater",
+			"candidate", candidate,
+			"last-term", lastTerm,
+			"last-candidate-term", args.Term)
+		reply.VoteGranted = false
+		return
+	}
+
+	if lastTerm == args.LastLogTerm && lastIdx > args.LastLogIndex {
+		rf.logger.Warn("rejecting vote request since our last index is greater",
+			"candidate", candidate,
+			"last-index", lastIdx,
+			"last-candidate-index", args.LastLogIndex)
+		reply.VoteGranted = false
+		return
+	}
+	
+	//  If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log,
+	// grant vote (§5.2, §5.4)
+	reply.VoteGranted = true
+	rf.setLeader(candidate)
+
+	// restart your election timer
+	rf.setLastContact()
+}
+
+
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []Log
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term          int
+	Success       bool
+	// optimization: accelerated log backtracking
+	ConflictTerm  int
+	ConflictIndex int
+}
+
+// appendEntries is invoked when we get an append entries RPC call.
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
 
 }
 
@@ -246,7 +365,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	if rf.killed() {
+		return false
+	}
+
+	//Call() sends a request and waits for a reply.
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+
+	//Call() is guaranteed to return (perhaps after a delay)
+	rf.logger.Info("[	sendRequestVote(", rf.me,") ] : send a election to ", server)
+
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	if rf.killed() {
+		return false
+	}
+
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+	//Call() is guaranteed to return (perhaps after a delay)
+	rf.logger.Info("[	sendAppendEntries(", rf.me,") ] : send a election to ", server)
 	return ok
 }
 
@@ -288,8 +428,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	rf.shutdownLock.Lock()
+	defer rf.shutdownLock.Unlock()
+	if !rf.killed() {
+		atomic.StoreInt32(&rf.dead, 1)
+		// Your code here, if desired.
+		close(rf.shutdownCh)
+	}
 }
 
 func (rf *Raft) killed() bool {
@@ -299,16 +444,169 @@ func (rf *Raft) killed() bool {
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
+//main server loop.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		// Check if we are doing a shutdown
+		select {
+		case <-rf.shutdownCh:
+			// Clear the leader to prevent forwarding
+			rf.setLeader(-1)
+			return
+		default:
+		}
 
+		switch rf.getState() {
+		case Follower:
+			rf.runFollower()
+		case Candidate:
+			rf.runCandidate()
+		case Leader:
+			rf.runLeader()
+		}
+	}
+}
+// runFollower runs the main loop while in the follower state.
+func (r *Raft) runFollower(){
+	r.logger.Info("entering follower state", "follower", r, "leader-id", r.me)
+	heartbeatTimer := randomTimeout(r.config().HeartbeatTimeout)
+	for r.getState() == Follower {
+		select {
+		case <-heartbeatTimer:
+			// Restart the heartbeat timer
+			hbTimeout := r.config().HeartbeatTimeout
+			heartbeatTimer = randomTimeout(hbTimeout)
+
+			// Check if we have had a successful contact
+			lastContact := r.LastContact()
+			if time.Now().Sub(lastContact) < hbTimeout {
+				continue
+			}
+		case <-r.shutdownCh:
+			return
+		}
 	}
 }
 
+// runCandidate runs the main loop while in the candidate state.
+func (r *Raft) runCandidate(){
+	//Increment currentTerm
+	term := r.getCurrentTerm() + 1
+	r.logger.Info("entering candidate state", "node", r, "term", term)
+	// Start vote for us, and set a timeout
+	voteCh := r.electSelf()
+	// At the beginning of each election round, reset the election timeout
+	electionTimeout := r.config().ElectionTimeout
+	electionTimer := randomTimeout(electionTimeout)
+	// Tally the votes, need a simple majority
+	grantedVotes := 0
+	votesNeeded := r.quorumSize()
+	for r.getState() == Candidate {
+		select {
+
+		case vote := <-voteCh:
+			// If RPC request or response contains term T > currentTerm:
+			//set currentTerm = T, convert to follower (§5.1)
+			if vote.Term > r.getCurrentTerm() {
+				r.logger.Debug("newer term discovered, fallback to follower", "term", vote.Term)
+				r.setState(Follower)
+				r.setCurrentTerm(vote.Term)
+				r.votedFor = -1
+				return
+			}
+			// Check if the vote is granted
+			if vote.VoteGranted {
+				grantedVotes++
+				r.logger.Debug("vote granted", "from", vote.voterID, "term", vote.Term, "tally", grantedVotes)
+			}
+			// Check if we've become the leader
+			if grantedVotes >= votesNeeded {
+				r.logger.Info("election won", "term", vote.Term, "tally", grantedVotes)
+				r.setState(Leader)
+				r.setLeader(int32(r.me))
+				return
+			}
+		case <-electionTimer:
+			//If election timeout elapses: start new election
+			r.logger.Warn("Election timeout reached, restarting election")
+			return
+		case <-r.shutdownCh:
+			return
+		}
+	}
+}
+
+// quorumSize is used to return the quorum size. This must only be called on
+// the main thread.
+func (r *Raft) quorumSize() int {
+	voters := len(r.peers)/2
+	return voters/2 + 1
+}
+
+
+
+// electSelf is used to send a RequestVote RPC to all peers, and vote for
+// ourself. This has the side affecting of incrementing the current term. The
+// response channel returned is used to wait for all the responses (including a
+// vote for ourself). This must only be called from the main thread.
+func (r *Raft) electSelf() <-chan *RequestVoteReply{
+	// Create a response channel
+	respCh := make(chan *RequestVoteReply, len(r.peers))
+
+	// Construct the request
+	lastIdx, lastTerm := r.getLastEntry()
+	req := &RequestVoteArgs{
+		Term:         r.currentTerm,
+		CandidateId:  int32(r.me),
+		LastLogIndex: lastIdx,
+		LastLogTerm:  lastTerm,
+	}
+
+	// Construct a function to ask for a vote
+	askPeer := func(peerId int) {
+		r.goFunc(func() {
+			voteReply := &RequestVoteReply{}
+			err := r.sendRequestVote(peerId, req, voteReply)
+			if !err{
+				r.logger.Error("failed to make requestVote RPC",
+					"target", peerId,
+					"error", err,
+					"term", req.Term)
+				voteReply.Term = req.Term
+				voteReply.VoteGranted = false
+			}
+			respCh <- voteReply
+		})
+	}
+
+	// For each peer, request a vote
+	for serverId,_:=range r.peers{
+		// vote for myself
+		if serverId==r.me {
+			r.logger.Debug("voting for self", "term", req.Term, "id", r.me)
+			// Include our own vote
+			respCh <-&RequestVoteReply{
+				Term:        req.Term,
+				VoteGranted: true,
+			}
+		}else{
+			r.logger.Debug("asking for vote", "term", req.Term, "from", serverId)
+			askPeer(serverId)
+		}
+	}
+	return respCh
+}
+
+
+// runLeader runs the main loop while in leader state. Do the setup here and drop into
+// the leaderLoop for the hot loop.
+func (r *Raft) runLeader(){
+
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -328,13 +626,36 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	atomic.StoreInt32(&rf.dead, 0)
+	rf.shutdownCh = make(chan struct{})
+
+	rf.conf.Store(DefaultConfig())
+
+	rf.currentTerm = 0
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.state = Follower
+	rf.lastSnapshotIndex = 0
+	rf.lastSnapshotTerm = 0
+	rf.lastLogIndex = 0
+	rf.lastLogTerm = 0
+
+	rf.votedFor = -1
+	rf.logs = make([]Log,0)
+
+	rf.applyCh = applyCh
+
+	rf.logger = hclog.New(&hclog.LoggerOptions{
+		Name:  "my-raft",
+		Level: hclog.LevelFromString(rf.config().LogLevel),
+		Output: rf.config().LogOutput,
+	})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
