@@ -434,6 +434,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		entry.Term = rf.getCommitIndex()
 		entry.Type = LogCommand
 		entry.Data = marshalInterface(command)
+		entry.AppendedAt = time.Now()
 		rf.logs = append(rf.logs, entry)
 		index ++
 		rf.logsLock.Unlock()
