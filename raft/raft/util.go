@@ -2,6 +2,7 @@ package raft
 
 import (
 	crand "crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -75,6 +76,22 @@ func generateUUID() string {
 		buf[10:16])
 }
 
+func marshalInterface(command interface{}) []byte {
+	b, err := json.Marshal(command)
+	if err != nil {
+		panic(fmt.Errorf("failed to convert interface{} to []byte: %v", err))
+	}
+	return b
+}
+
+func unMarshlInterface(commandData []byte) interface{} {
+	var command interface{}
+	err := json.Unmarshal(commandData, &command)
+	if err != nil {
+		panic(fmt.Errorf("Unmarshal command error: %v", err))
+	}
+	return command
+}
 
 // Needed for sorting []uint64, used to determine commitment
 type uint64Slice []uint64

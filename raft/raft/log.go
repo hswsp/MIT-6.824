@@ -12,14 +12,43 @@ import "time"
 
 // LogType describes various types of log entries.
 type LogType uint8
+const (
+	// LogCommand is applied to a user FSM.
+	LogCommand LogType = iota
+
+	// LogNoop is used to assert leadership.
+	LogNoop
+
+	// LogAddPeerDeprecated is used to add a new peer. This should only be used with
+	// older protocol versions designed to be compatible with unversioned
+	// Raft servers. See comments in config.go for details.
+	LogAddPeerDeprecated
+
+	// LogRemovePeerDeprecated is used to remove an existing peer. This should only be
+	// used with older protocol versions designed to be compatible with
+	// unversioned Raft servers. See comments in config.go for details.
+	LogRemovePeerDeprecated
+
+	// LogBarrier is used to ensure all preceding operations have been
+	// applied to the FSM. It is similar to LogNoop, but instead of returning
+	// once committed, it only returns once the FSM manager acks it. Otherwise,
+	// it is possible there are operations committed but not yet applied to
+	// the FSM.
+	LogBarrier
+
+	// LogConfiguration establishes a membership change configuration. It is
+	// created when a server is added, removed, promoted, etc. Only used
+	// when protocol version 1 or greater is in use.
+	LogConfiguration
+)
 
 // Log entries are replicated to all members of the Raft cluster
 // and form the heart of the replicated state machine.
 type Log struct {
-	// Index holds the index of the log entry.
+	// Index holds the index of the log entry. Start from 1. We use log[Index-1] to fetch
 	Index uint64
 
-	// Term holds the election term of the log entry.
+	// Term holds the election term of the log entry. Start from 1.
 	Term uint64
 
 	// Type holds the type of the log entry.

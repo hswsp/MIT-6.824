@@ -30,7 +30,7 @@ type raftState struct {
 	// the struct so they're 64 bit aligned which is a requirement for
 	// atomic ops on 32 bit platforms.
 
-	// The current term, cache of StableStore
+	// The current term, cache of StableStore, start from 1
 	currentTerm uint64
 
 	// Highest committed log entry
@@ -57,14 +57,6 @@ type raftState struct {
 	state RaftState
 }
 
-// leaderState is state that is used while we are a leader.
-type LeaderState struct {
-
-	//volatile state on leaders
-	nextIndex  []uint64
-	matchIndex []uint64
-}
-
 func (r *raftState) getState() RaftState {
 	stateAddr := (*uint32)(&r.state)
 	return RaftState(atomic.LoadUint32(stateAddr))
@@ -81,6 +73,14 @@ func (r *raftState) getCurrentTerm() uint64 {
 
 func (r *raftState) setCurrentTerm(term uint64) {
 	atomic.StoreUint64(&r.currentTerm, term)
+}
+
+func (r *raftState) getCommitIndex() uint64 {
+	return atomic.LoadUint64(&r.commitIndex)
+}
+
+func (r *raftState) setCommitIndex(index uint64) {
+	atomic.StoreUint64(&r.commitIndex, index)
 }
 
 func (r *raftState) getLastApplied() uint64 {
@@ -152,4 +152,48 @@ func (r *raftState) getLastEntry() (uint64, uint64) {
 	}
 	return r.lastSnapshotIndex, r.lastSnapshotTerm
 }
+
+// leaderState is state that is used while we are a leader.
+type LeaderState struct {
+	// protects 2 next fields
+	indexLock sync.Mutex
+	//volatile state on leaders
+	nextIndex  []uint64
+	matchIndex []uint64
+
+
+	//information about heartbeat to others
+	replState  map[int] *AppendEntriesArgs
+	stepDown   chan struct{}
+
+	// commitment tracks the entries acknowledged by followers so that the
+	// leader's commit index can advance. It is updated on successful
+	// AppendEntries responses.
+	commitCh   chan *AppendEntriesReply
+}
+
+func (ls * LeaderState) getState(serverID int) (uint64,uint64)  {
+	ls.indexLock.Lock()
+	defer ls.indexLock.Unlock()
+	return ls.nextIndex[serverID],ls.matchIndex[serverID]
+}
+
+func (ls *LeaderState) setNextIndex(serverId int, index uint64)  {
+	ls.indexLock.Lock()
+	defer ls.indexLock.Unlock()
+	if index < 1 {
+		ls.nextIndex[serverId] = 1
+	}else {
+		ls.nextIndex[serverId] = index
+	}
+
+}
+
+func (ls *LeaderState) updateStateSuccess(serverID int,match uint64)  {
+	ls.indexLock.Lock()
+	defer ls.indexLock.Unlock()
+	ls.matchIndex[serverID] = match
+	ls.nextIndex[serverID] = ls.matchIndex[serverID] + 1
+}
+
 

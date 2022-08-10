@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"time"
@@ -56,20 +55,20 @@ type Config struct {
 // a. ElectionTimeout: 150ms-300ms, HeartbeatTimeout: 50ms
 // b. ElectionTimeout: 200ms-400ms, HeartbeatTimeout: 100ms
 // ref: https://github.com/springfieldking/mit-6.824-golabs-2018/issues/1
-func DefaultConfig() *Config {
+func DefaultConfig() Config {
 	id := generateUUID()
-	file, err := os.Create("./debug.log")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	return &Config{
+	//file, err := os.Create("./debug.log")
+	//if err != nil {
+	//	fmt.Println(err)
+	//	os.Exit(1)
+	//}
+	return Config{
 		HeartbeatTimeout:   100 * time.Millisecond,
 		ElectionTimeout:    200 * time.Millisecond,
 		CommitTimeout:      50 * time.Millisecond,
 		LeaderLeaseTimeout: 50 * time.Millisecond,
 		LogLevel:           "DEBUG",
 		LocalID:            ServerID(id),
-		LogOutput:          file,
+		LogOutput:          os.Stderr,
 	}
 }
