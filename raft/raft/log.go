@@ -8,8 +8,6 @@
  */
 package raft
 
-import "time"
-
 // LogType describes various types of log entries.
 type LogType uint8
 const (
@@ -71,17 +69,4 @@ type Log struct {
 	// trouble, so gating extension behavior via some flag in the client
 	// program is also a good idea.
 	Extensions []byte
-
-	// AppendedAt stores the time the leader first appended this log to it's
-	// LogStore. Followers will observe the leader's time. It is not used for
-	// coordination or as part of the replication protocol at all. It exists only
-	// to provide operational information for example how many seconds worth of
-	// logs are present on the leader which might impact follower's ability to
-	// catch up after restoring a large snapshot. We should never rely on this
-	// being in the past when appending on a follower or reading a log back since
-	// the clock skew can mean a follower could see a log with a future timestamp.
-	// In general too the leader is not required to persist the log before
-	// delivering to followers although the current implementation happens to do
-	// this.
-	AppendedAt time.Time
 }

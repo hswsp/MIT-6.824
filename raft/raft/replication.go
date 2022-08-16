@@ -1,12 +1,14 @@
 package raft
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-type AppendEntriesArgs struct {
+// followerReplication is in charge of sending snapshots and log entries from
+// this leader during this particular term to a remote follower.
+type followerReplication struct {
 	Term         uint64
 	LeaderId     int32
 	PrevLogIndex uint64
@@ -30,6 +32,20 @@ type AppendEntriesArgs struct {
 	// StepDown is used to indicate to the leader that we
 	// should step down based on information from a follower.
 	StepDown chan struct{}
+
+	// commitment tracks the entries acknowledged by followers so that the
+	// leader's commit index can advance. It is updated on successful
+	// AppendEntries responses.
+	commitCh   chan *AppendEntriesReply
+}
+
+type AppendEntriesArgs struct {
+	Term         uint64
+	LeaderId     int32
+	PrevLogIndex uint64
+	PrevLogTerm  uint64
+	Entries      []Log
+	LeaderCommit uint64
 }
 
 type AppendEntriesReply struct {
@@ -49,8 +65,18 @@ func (s *AppendEntriesArgs) getLeaderId() int32 {
 func (s *AppendEntriesArgs) setLeaderId(peer int32)  {
 	atomic.StoreInt32(&s.LeaderId,peer)
 }
+
+func (s *followerReplication) getLeaderId() int32 {
+	return atomic.LoadInt32(&s.LeaderId)
+}
+
+func (s *followerReplication) setLeaderId(peer int32)  {
+	atomic.StoreInt32(&s.LeaderId,peer)
+}
+
+
 // getLastContact returns the time of last contact.
-func (s *AppendEntriesArgs) getLastContact() time.Time {
+func (s *followerReplication) getLastContact() time.Time {
 	s.LastContactLock.RLock()
 	last := s.LastContact
 	s.LastContactLock.RUnlock()
@@ -58,7 +84,7 @@ func (s *AppendEntriesArgs) getLastContact() time.Time {
 }
 
 // setLastContact sets the last contact to the current time.
-func (s *AppendEntriesArgs) setLastContact() {
+func (s *followerReplication) setLastContact() {
 	s.LastContactLock.Lock()
 	s.LastContact = time.Now()
 	s.LastContactLock.Unlock()
@@ -66,14 +92,18 @@ func (s *AppendEntriesArgs) setLastContact() {
 
 // appendEntries is invoked when we get an append entries RPC call.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
-	rf.logger.Info("Server %d: got AppendEntries from leader %d, args: %+v, current term: %d, " +
-		"current commitIndex: %d, current log: %v\n", rf.me, args.LeaderId, args, rf.currentTerm,
-		rf.commitIndex, rf.logs)
-	defer rf.logger.Info("======= server %d got AppendEntries from leader %d, args: %+v, current log: %v, " +
-			"reply: %+v =======\n", rf.me, args.LeaderId, args, rf.logs, reply)
+	rf.logger.Info("got AppendEntries ","Server ", rf.me,"from leader ", args.LeaderId, ", args: ", args,", current term: ", rf.currentTerm, ", " +
+		"current commitIndex: ",rf.commitIndex,", current log: ", rf.logs)
+	if rf.killed() {
+		reply.Term = 0
+		reply.Success = false
+		return
+	}
+	defer rf.logger.Info("======= finished AppendEntries ","server ", rf.me," from leader ", args.LeaderId,", args: ", args,", current log: ", rf.logs,
+		", reply:", reply,"=======")
 
 	currentTerm := rf.getCurrentTerm()
-	originLogEntries := rf.getLogEntries()
+	originLogEntries := rf.getLogEntries(0)
 	logEntryLen := uint64(len(originLogEntries))
 
 	reply.ServerID = rf.me
@@ -82,6 +112,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = currentTerm
 		reply.Success = false
 		return
+	}
+
+	// Save the current leader
+	rf.setLeader(args.LeaderId)
+
+	// Increase the term if we see a newer one, also transition to follower
+	// if we ever get an appendEntries call
+	if args.Term > rf.getCurrentTerm() || rf.getState() != Follower {
+		// Ensure transition to follower
+		rf.setState(Follower)
+		rf.setCurrentTerm(args.Term)
+		reply.Term = args.Term
 	}
 
 	//Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
@@ -107,17 +149,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictIndex = getConflictTermIndex(prevLogTerm,originLogEntries)
 		return
 	}
-
-	// Increase the term if we see a newer one, also transition to follower
-	// if we ever get an appendEntries call
-	if args.Term > rf.getCurrentTerm() || rf.getState() != Follower {
-		// Ensure transition to follower
-		rf.setState(Follower)
-		rf.setCurrentTerm(args.Term)
-		reply.Term = args.Term
-	}
-	// Save the current leader
-	rf.setLeader(args.LeaderId)
 
 	// Process any new entries
 	//If an existing entry conflicts with a new one (same index but different terms),
@@ -156,11 +187,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		return false
 	}
 
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	rf.logger.Debug("starting sending an appendEntries request","from ", rf.me," to ", server)
 
 	//Call() is guaranteed to return (perhaps after a delay)
-	rf.logger.Info("[	sendAppendEntries(", rf.me,") ] : send a election to ", server)
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
+	rf.logger.Debug("finished sending an appendEntries request ","from ", rf.me,"to ", server, "returned")
 	return ok
 }
 
@@ -185,51 +217,99 @@ func startConflictIndex(argsEntries []Log, prevLogIndex uint64, logEntries []Log
 	return 0,false
 }
 
-//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-func (rf *Raft) startApplyLogs() {
-	lastIndex := rf.getLastIndex()
-	// may only be partially submitted
-	for rf.lastApplied < rf.commitIndex{
-		rf.setLastApplied(rf.getLastApplied() + 1)
-		lastIndex++
-		msg := ApplyMsg{}
-		msg.CommandValid = true
-		msg.CommandIndex = int(rf.getLastApplied())
-		rf.logsLock.RLock()
-		msg.Command = unMarshlInterface(rf.logs[rf.getLastApplied()-1].Data)
-		rf.logsLock.Unlock()
-		rf.applyCh <- msg
-	}
-	// Update the last log since it's on disk now
-	rf.setLastLog(lastIndex, rf.getCurrentTerm())
-
-}
-
 // replicate is a long running routine that replicates log entries to a single
 // follower.
-func (r *Raft) replicate(id int, s *AppendEntriesArgs){
+func (r *Raft) replicate(id int, s *followerReplication){
+	r.logger.Debug("starts an async heartbeating routing ", " leader ",r.me ,"connecting to peer ",id)
 	// Start an async heartbeating routing
 	stopHeartbeat := make(chan struct{})
-	defer close(stopHeartbeat)
+	defer func() {
+		close(stopHeartbeat)
+	}()
 	r.goFunc(func() { r.heartbeat(id, s, stopHeartbeat) })
+	shouldStop := false
+	for !shouldStop {
+		select {
+		case lastIndex :=<-s.stopCh:
+			r.logger.Info("removed peer, stopping replication", "peer", id, "last-index", lastIndex)
+			shouldStop = true
+		case reply :=<-s.commitCh:
+			//handle reply
+			r.mu.Lock()
+			currentTerm :=r.getCurrentTerm()
+			args :=r.leaderState.replState[reply.ServerID]
+			currentLogs := r.getLogEntries(0)
+			r.mu.Unlock()
+			//If RPC request or response contains term T > currentTerm:
+			//set currentTerm = T, convert to follower (§5.1)
+			if reply.Term > currentTerm {
+				// 退出循环, 转换为follower
+				r.logger.Info("turn back to follower due to existing higher term","leader ",r.me,"term: ",reply.Term, "from server ", reply.ServerID )
+				r.setState(Follower)
+				return
+			}
+			if reply.Success == true {
+				//If successful: update nextIndex and matchIndex for follower (§5.3)
+				r.logger.Info("update sever state","sever", reply.ServerID," matchIndex ",args.PrevLogIndex + uint64(len(args.Entries)))
+				r.leaderState.updateStateSuccess(reply.ServerID,args.PrevLogIndex + uint64(len(args.Entries)))
+				//If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+				//and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+				copyMatchIndex := make(uint64Slice, len(r.peers))
+				copy(copyMatchIndex, r.leaderState.matchIndex)
+				copyMatchIndex[r.me] = uint64(len(currentLogs))
+				//sort and get the middle to judge the majority
+				sort.Slice(copyMatchIndex, copyMatchIndex.Less)
+				N := copyMatchIndex[len(r.peers)/2]
+				if N > r.getCommitIndex() && currentLogs[N-1].Term == currentTerm {
+					r.setCommitIndex(N)
+				}
+				r.startApplyLogs()
+			}else {
+				//If AppendEntries fails because of log inconsistency:
+				//decrement nextIndex and retry (§5.3)
 
+				//Upon receiving a conflict response, the leader should first search its log for conflictTerm.
+				upperbound, founded := r.lastConfictTermIndex(reply.ConflictTerm)
+				if founded {
+					//If it finds an entry in its log with that term,
+					//it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
+					r.leaderState.setNextIndex(reply.ServerID, upperbound)
+				} else {
+					r.leaderState.setNextIndex(reply.ServerID, reply.ConflictIndex)
+				}
+			}
+		case <-r.shutdownCh:
+			shouldStop = true
+			return
+		}
+	}
 }
 
 // heartbeat is used to periodically invoke AppendEntries on a peer
 // to ensure they don't time out. This is done async of replicate(),
 // since that routine could potentially be blocked on disk IO.
-func (r *Raft) heartbeat(id int, s *AppendEntriesArgs, stopCh chan struct{}){
+func (r *Raft) heartbeat(id int, s *followerReplication, stopCh chan struct{}){
 	// repeat during idle periods to prevent election timeouts
 	for {
+		// Don't have these loops execute continuously without pausing
 		// Wait for the next heartbeat interval or forced notify
 		select {
-		case <-randomTimeout(r.config().HeartbeatTimeout / 10):
+		case <-randomTimeout(r.config().HeartbeatTimeout / 5):
 		case <-stopCh:
 			return
 		}
+		args  := &AppendEntriesArgs{
+			Term:         s.Term,
+			LeaderId:     s.LeaderId,
+			PrevLogIndex: s.PrevLogIndex,
+			PrevLogTerm:  s.PrevLogTerm,
+			Entries:      s.Entries,
+			LeaderCommit: s.LeaderCommit,
+		}
 		reply := &AppendEntriesReply{}
-		ok := r.sendAppendEntries(id, s, reply)
+		ok := r.sendAppendEntries(id, args, reply)
 		if !ok {
+			//When sending RPC fails, you should follow the description of the paper and keep retries (&5.3)
 			r.logger.Error("failed to heartbeat to", "peer", id)
 			// If ok==false, it means that the heartbeat packet is not sent out, there are two possibilities:
 			// 1. The leader loses the connection 2. The follower that accepts the heartbeat packet loses the connection
@@ -238,8 +318,8 @@ func (r *Raft) heartbeat(id int, s *AppendEntriesArgs, stopCh chan struct{}){
 			// If it is possibility 2, it does not affect, continue to send heartbeat packets to other connected servers
 			// So, it can be seen that there is no need to do special processing for ok == false
 		}else{
-			r.leaderState.commitCh <-reply
 			//you get an AppendEntries RPC from the current leader
+			s.commitCh <- reply
 			//update heartbeat timer
 			s.setLastContact()
 		}

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -21,6 +22,19 @@ const (
 	// Shutdown is the terminal state of a Raft node.
 	Shutdown
 )
+
+func (e RaftState) String() string {
+	switch e {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	default:
+		return fmt.Sprintf("%d", int(e))
+	}
+}
 
 // raftState is used to maintain various state variables
 // and provides an interface to set/get the variables in a
@@ -57,6 +71,22 @@ type raftState struct {
 	state RaftState
 }
 
+// LeaderState leaderState is state that is used while we are a leader.
+type LeaderState struct {
+	// protects 2 next fields
+	indexLock sync.Mutex
+	//volatile state on leaders
+	nextIndex  []uint64
+	matchIndex []uint64
+
+	//information about heartbeat to others
+	replState  map[int] *followerReplication
+	stepDown   chan struct{}
+
+	commitCh   chan struct{}
+
+}
+
 func (r *raftState) getState() RaftState {
 	stateAddr := (*uint32)(&r.state)
 	return RaftState(atomic.LoadUint32(stateAddr))
@@ -89,6 +119,10 @@ func (r *raftState) getLastApplied() uint64 {
 
 func (r *raftState) setLastApplied(index uint64) {
 	atomic.StoreUint64(&r.lastApplied, index)
+}
+
+func  (r *raftState) addLastApplied(delta uint64) (new uint64){
+	return atomic.AddUint64(&r.lastApplied,delta)
 }
 
 func (r *raftState) getLastLog() (index, term uint64) {
@@ -153,24 +187,7 @@ func (r *raftState) getLastEntry() (uint64, uint64) {
 	return r.lastSnapshotIndex, r.lastSnapshotTerm
 }
 
-// leaderState is state that is used while we are a leader.
-type LeaderState struct {
-	// protects 2 next fields
-	indexLock sync.Mutex
-	//volatile state on leaders
-	nextIndex  []uint64
-	matchIndex []uint64
 
-
-	//information about heartbeat to others
-	replState  map[int] *AppendEntriesArgs
-	stepDown   chan struct{}
-
-	// commitment tracks the entries acknowledged by followers so that the
-	// leader's commit index can advance. It is updated on successful
-	// AppendEntries responses.
-	commitCh   chan *AppendEntriesReply
-}
 
 func (ls * LeaderState) getState(serverID int) (uint64,uint64)  {
 	ls.indexLock.Lock()

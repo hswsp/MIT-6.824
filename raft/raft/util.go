@@ -93,6 +93,23 @@ func unMarshlInterface(commandData []byte) interface{} {
 	return command
 }
 
+// cappedExponentialBackoff computes the exponential backoff with an adjustable
+// cap on the max timeout.
+func cappedExponentialBackoff(base time.Duration, round, limit uint64, cap time.Duration) time.Duration {
+	power := min(round, limit)
+	for power > 2 {
+		if base > cap {
+			return cap
+		}
+		base *= 2
+		power--
+	}
+	if base > cap {
+		return cap
+	}
+	return base
+}
+
 // Needed for sorting []uint64, used to determine commitment
 type uint64Slice []uint64
 
