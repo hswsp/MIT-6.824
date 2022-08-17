@@ -8,6 +8,8 @@
  */
 package raft
 
+import "fmt"
+
 // LogType describes various types of log entries.
 type LogType uint8
 const (
@@ -69,4 +71,8 @@ type Log struct {
 	// trouble, so gating extension behavior via some flag in the client
 	// program is also a good idea.
 	Extensions []byte
+}
+
+func (e Log) String() string {
+	return fmt.Sprintf("Index = %d, Term = %d, Type = %d, Data = %s", e.Index,e.Term,e.Type,unMarshlInterface(e.Data))
 }

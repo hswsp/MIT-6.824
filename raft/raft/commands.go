@@ -1,24 +1,65 @@
 package raft
 
-import "6.824/labrpc"
+import (
+	"fmt"
+	"sync/atomic"
+)
 
-// AppendEntriesRequest is the command used to append entries to the
+// AppendEntriesArgs is the command used to append entries to the
 // replicated log.
-type AppendEntriesRequest struct {
+type AppendEntriesArgs struct {
+	Term         uint64
+	LeaderId     int32
+	PrevLogIndex uint64 //index of log entry immediately preceding new ones
+	PrevLogTerm  uint64 //term of prevLogIndex entry
+	Entries      []Log
+	LeaderCommit uint64
+}
 
-	// Provide the current term and leader
+// RequestVoteArgs
+// example RequestVote RPC arguments structure.
+// field names must start with capital letters!
+//
+type RequestVoteArgs struct {
+	// Your data here (2A, 2B).
 	Term uint64
+	CandidateId int32
+	// Cache the latest log from LogStore
+	LastLogIndex uint64
+	LastLogTerm  uint64
+}
 
-	// RPC end points of leader
-	Leader  *labrpc.ClientEnd
+//
+// example RequestVote RPC reply structure.
+// field names must start with capital letters!
+//
+type RequestVoteReply struct {
+	// Your data here (2A).
+	Term uint64
+	VoteGranted bool
+	VoterID string
+}
 
-	// Provide the previous entries for integrity checking
-	PrevLogIndex uint64
-	PrevLogTerm  uint64
+type AppendEntriesReply struct {
+	ServerID      int
+	Term          uint64
+	Success       bool
 
-	// New entries to commit
-	Entries []*Log
+	// optimization: accelerated log backtracking
+	ConflictTerm  uint64  // first Log Term that conflicts between follower and leader
+	ConflictIndex uint64  // first Log Index that conflicts between follower and leader
+}
 
-	// Commit index on the leader
-	LeaderCommitIndex uint64
+
+func (arg AppendEntriesArgs) String() string {
+	return fmt.Sprintf("Term = %d, LeaderId = %d, PrevLogIndex = %d, PrevLogTerm = %d, LeaderCommit = %d, Entries = %s",
+		arg.Term,arg.LeaderId,arg.PrevLogIndex,arg.PrevLogTerm,arg.LeaderCommit,arg.Entries)
+}
+
+func (s *AppendEntriesArgs) getLeaderId() int32 {
+	return atomic.LoadInt32(&s.LeaderId)
+}
+
+func (s *AppendEntriesArgs) setLeaderId(peer int32)  {
+	atomic.StoreInt32(&s.LeaderId,peer)
 }
