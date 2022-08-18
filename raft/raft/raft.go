@@ -412,6 +412,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logger.Info("got a new Start task","current node :",rf.me," , command: ",command )
 	index := -1
 	term , isLeader := rf.GetState()
+
+	if rf.killed() {
+		return index, term, false
+	}
+
 	// Your code here (2B).
 	if !isLeader {
 		return index, term, isLeader
@@ -428,7 +433,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry.Index = uint64(index)
 	entry.Term = rf.getCurrentTerm()
 	entry.Type = LogCommand
-	entry.Data = marshalInterface(command)
+	entry.Data = command
 
 	rf.logs = append(rf.logs, entry)
 	rf.logsLock.Unlock()
@@ -513,6 +518,8 @@ func (r *Raft) runFollower(){
 			// Check if we have had a successful contact
 			lastContact := r.LastContact()
 			if time.Now().Sub(lastContact) < hbTimeout {
+				r.logger.Info("normal heartbeat, check current state","currentTerm",r.getCurrentTerm(),
+					"votedFor",r.getVotedFor(),"leaderID",r.getLeader(),"logs",r.getLogEntries())
 				continue
 			}
 			// Heartbeat failed! Transition to the candidate state

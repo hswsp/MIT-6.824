@@ -395,7 +395,7 @@ func (rf *Raft) startApplyLogs() {
 
 		rf.logsLock.RLock()
 		entry := rf.logs[newLastApplied-1]
-		msg.Command = unMarshlInterface(entry.Data)
+		msg.Command = entry.Data
 		rf.logsLock.RUnlock()
 
 		// Update the last log since it's on disk now
@@ -420,18 +420,21 @@ func (r *Raft) updateLastAppended(serverID int,lastIndex uint64,s *followerRepli
 		prevLogTerm = r.logs[prevLogIndex - 1].Term
 	}
 	r.mu.Unlock()
-	r.logsLock.RLock()
+
 	// Append to the lastIndex.
 	// we need to use a consistent value for maxAppendEntries in the lines below in case it ever
 	// becomes reloadable.
 	r.logger.Debug("Append Log up to the lastIndex","prevLogIndex",prevLogIndex,"lastIndex",lastIndex)
-	entries := append([]Log{}, r.getLogSlices(prevLogIndex - 1, lastIndex)...)//slice needs to be unpacked and appended
-	r.logsLock.RUnlock()
+	if prevLogIndex == uint64(len(r.getLogEntries())){
+		r.logger.Info("All logs are sent to this peer","peerID",serverID)
+	}else{
+		entries := append([]Log{}, r.getLogSlices(prevLogIndex - 1, lastIndex)...)//slice needs to be unpacked and appended
+		s.Entries = entries
+	}
 
 	//update followerReplication
 	s.Term = r.getCurrentTerm()
 	s.PrevLogIndex = prevLogIndex
 	s.PrevLogTerm = prevLogTerm
-	s.Entries = entries
 	s.LeaderCommit = r.getCommitIndex()
 }

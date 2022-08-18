@@ -55,7 +55,7 @@ type Log struct {
 	Type LogType
 
 	// Data holds the log entry's type-specific data.
-	Data []byte
+	Data interface{}
 
 	// Extensions holds an opaque byte slice of information for middleware. It
 	// is up to the client of the library to properly modify this as it adds
@@ -74,5 +74,5 @@ type Log struct {
 }
 
 func (e Log) String() string {
-	return fmt.Sprintf("Index = %d, Term = %d, Type = %d, Data = %s", e.Index,e.Term,e.Type,unMarshlInterface(e.Data))
+	return fmt.Sprintf("Index = %d, Term = %d, Type = %d, Data = %s", e.Index,e.Term,e.Type,e.Data)
 }
