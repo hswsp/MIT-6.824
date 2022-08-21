@@ -42,6 +42,8 @@ const (
 	Success RPCState = iota
 	// Failure  is one of the valid states of a RPC node.
 	Failure
+	// BACKTRACK is one of the valid states of a RPC node.
+	BACKTRACK
 	// OverTime is one of the valid states of a RPC node.
 	OverTime
 )
@@ -62,7 +64,7 @@ func (e RPCState) String() string {
 // and provides an interface to set/get the variables in a
 // thread safe manner.
 type raftState struct {
-	// currentTerm commitIndex, lastApplied,  must be kept at the top of
+	// currentTerm commitIndex, lastLogIndex,  must be kept at the top of
 	// the struct so they're 64 bit aligned which is a requirement for
 	// atomic ops on 32 bit platforms.
 
@@ -71,6 +73,8 @@ type raftState struct {
 
 	// Highest committed log entry
 	commitIndex uint64
+	// Last applied log to the FSM
+	lastApplied uint64
 
 	// protects 4 next fields
 	lastLock sync.Mutex
@@ -80,15 +84,17 @@ type raftState struct {
 	lastSnapshotTerm  uint64
 
 	// Cache the latest log that in Persistent state (stored in FSM)
-	// Last applied log to the FSM
-	lastApplied uint64
+	lastLogIndex uint64
 	lastLogTerm  uint64
 
 	// Tracks running goroutines
 	routinesGroup sync.WaitGroup
 
 	// The current state
-	state RaftState
+	state         RaftState
+
+	//dedicated thread calling r.app.apply
+	applyLogCh       chan struct{}
 }
 
 // LeaderState leaderState is state that is used while we are a leader.
@@ -101,7 +107,11 @@ type LeaderState struct {
 
 	//information about heartbeat to others
 	replState  map[int] *followerReplication
+
+	// stepDown is used to indicate to the leader that we
+	// should step down based on information from a follower.
 	stepDown   chan struct{}
+
 	commitCh   chan struct{}
 
 	// Tracks replicate goroutines
@@ -149,7 +159,7 @@ func  (r *raftState) addLastApplied(delta uint64) (new uint64){
 
 func (r *raftState) getLastLog() (index, term uint64) {
 	r.lastLock.Lock()
-	index = r.lastApplied
+	index = r.lastLogIndex
 	term = r.lastLogTerm
 	r.lastLock.Unlock()
 	return
@@ -158,7 +168,7 @@ func (r *raftState) getLastLog() (index, term uint64) {
 //store the Term and Index of latest Log
 func (r *raftState) setLastLog(index, term uint64) {
 	r.lastLock.Lock()
-	r.lastApplied = index
+	r.lastLogIndex = index
 	r.lastLogTerm = term
 	r.lastLock.Unlock()
 }
@@ -191,24 +201,12 @@ func (r *raftState) waitShutdown() {
 	r.routinesGroup.Wait()
 }
 
-func (l *LeaderState) goFunc(f func()) {
-	l.routinesGroup.Add(1)
-	go func() {
-		defer l.routinesGroup.Done()
-		f()
-	}()
-}
-
-func (l *LeaderState) waitStepDown() {
-	l.routinesGroup.Wait()
-}
-
 // getLastIndex returns the last index in stable storage.
 // Either from the last log or from the last snapshot.
 func (r *raftState) getLastIndex() uint64 {
 	r.lastLock.Lock()
 	defer r.lastLock.Unlock()
-	return max(r.lastApplied, r.lastSnapshotIndex)
+	return max(r.lastLogIndex, r.lastSnapshotIndex)
 }
 
 // getLastEntry returns the last index and term in stable storage.
@@ -216,13 +214,11 @@ func (r *raftState) getLastIndex() uint64 {
 func (r *raftState) getLastEntry() (uint64, uint64) {
 	r.lastLock.Lock()
 	defer r.lastLock.Unlock()
-	if r.lastApplied >= r.lastSnapshotIndex {
-		return r.lastApplied, r.lastLogTerm
+	if r.lastLogIndex >= r.lastSnapshotIndex {
+		return r.lastLogIndex, r.lastLogTerm
 	}
 	return r.lastSnapshotIndex, r.lastSnapshotTerm
 }
-
-
 
 func (ls * LeaderState) getState(serverID int) (uint64,uint64)  {
 	ls.indexLock.Lock()

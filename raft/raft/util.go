@@ -116,3 +116,16 @@ type uint64Slice []uint64
 func (p uint64Slice) Len() int           { return len(p) }
 func (p uint64Slice) Less(i, j int) bool { return p[i] < p[j] }
 func (p uint64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+// backoff is used to compute an exponential backoff
+// duration. Base time is scaled by the current round,
+// up to some maximum scale factor.
+// backoff = base*2^(min(round, limit) - 2)
+func backoff(base time.Duration, round, limit uint64) time.Duration {
+	power := min(round, limit)
+	for power > 2 {
+		base *= 2
+		power--
+	}
+	return base
+}

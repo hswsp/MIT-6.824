@@ -57,18 +57,26 @@ type Config struct {
 // ref: https://github.com/springfieldking/mit-6.824-golabs-2018/issues/1
 func DefaultConfig() Config {
 	id := generateUUID()
-	//file, err := os.Create("./debug.log")
-	//if err != nil {
-	//	fmt.Println(err)
-	//	os.Exit(1)
-	//}
 	return Config{
 		HeartbeatTimeout:   100 * time.Millisecond,
 		ElectionTimeout:    200 * time.Millisecond,
 		CommitTimeout:      50 * time.Millisecond,
-		LeaderLeaseTimeout: 50 * time.Millisecond,
+		LeaderLeaseTimeout: 60 * time.Millisecond,
 		LogLevel:           "DEBUG",
 		LocalID:            ServerID(id),
 		LogOutput:          os.Stderr,
+	}
+}
+
+func FileConfig(file io.Writer) Config {
+	id := generateUUID()
+	return Config{
+		HeartbeatTimeout:   100 * time.Millisecond,
+		ElectionTimeout:    400 * time.Millisecond,
+		CommitTimeout:      50 * time.Millisecond,
+		LeaderLeaseTimeout: 60 * time.Millisecond,
+		LogLevel:           "DEBUG",
+		LocalID:            ServerID(id),
+		LogOutput:          file,
 	}
 }

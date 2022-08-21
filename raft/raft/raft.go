@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"github.com/hashicorp/go-hclog"
+	"os"
 	"time"
 
 	//	"bytes"
@@ -106,8 +107,8 @@ type Raft struct {
 	lastContact     time.Time
 	lastContactLock sync.RWMutex
 
-	// RPC chan comes from the transport layer
-	rpcCh  chan RPC
+	// committedCh chan notify client we have committed
+	committedCh  chan struct{}
 
 	// applyCh is used to async send logs to the main thread to
 	// be committed and applied to the FSM.
@@ -174,7 +175,7 @@ func (r *Raft) getLogEntries() []Log{
 // return [startPos, endIndex) in logs, endIndex not included
 func (r *Raft) getLogSlices(startPos uint64,endIndex uint64) []Log{
 	r.logsLock.RLock()
-	entries :=r.logs[min(startPos,0):endIndex]
+	entries :=r.logs[startPos:endIndex]
 	r.logsLock.RUnlock()
 	return entries
 }
@@ -183,6 +184,8 @@ func (r *Raft) appendLogEntries(cutPos uint64, logSlice []Log) {
 	r.logsLock.Lock()
 	defer r.logsLock.Unlock()
 	r.logs = append(r.logs[:cutPos], logSlice...)
+	lastEntry := r.logs[len(r.logs)-1]
+	r.setLastLog(lastEntry.Index,lastEntry.Term)
 }
 
 // return currentTerm and whether this server
@@ -191,11 +194,9 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	rf.mu.Lock()
-	defer  rf.mu.Unlock()
-	term = int(rf.currentTerm)
-	rf.logger.Debug("Get state of peer","the peer[", rf.me, "] state is:", rf.state)
-	if rf.state == Leader{
+	term = int(rf.getCurrentTerm())
+	rf.logger.Debug("Get state of peer","the peer[", rf.me, "] state is:", rf.getState())
+	if rf.getState() == Leader{
 		isleader = true
 	}else{
 		isleader = false
@@ -284,6 +285,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // requestVote is invoked when we get a request vote RPC call.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	candidate := args.CandidateId
+	rf.logger.Info("======= got RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
+		", args: ", args,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
+	defer rf.logger.Info("======= finished RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
+		", reply: ", reply,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
+
 	// current node crash
 	if rf.killed() {
 		reply.Term = 0
@@ -291,17 +298,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	candidate := args.CandidateId
-	rf.logger.Info("======= got RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
-		", args: ", args,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
-	defer rf.logger.Info("======= finished RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
-		", args: ", args,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
-
+	currentTermInt,isLeader := rf.GetState()
+	currentTerm := uint64(currentTermInt)
 	// reply term should be currentTerm
-	reply.Term = rf.getCurrentTerm()
+	reply.Term = currentTerm
 
 	//reason: A network partition occurs, the candidate has OutOfDate
-	if args.Term < rf.getCurrentTerm() {
+	if args.Term < currentTerm {
 		reply.VoteGranted = false
 		rf.logger.Debug("======= got RequestVote =======","server",rf.me,"from candidate ",args.CandidateId,", args: ",args,", current log: ",rf.logs,", reply: ",reply)
 		return
@@ -309,19 +312,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	voteFor := rf.getVotedFor()
 	// Check if we've voted in this election before
-	if args.Term == rf.getCurrentTerm() && voteFor != -1 && voteFor != args.CandidateId{
+	if args.Term == currentTerm && voteFor != -1 && voteFor != args.CandidateId{
 		rf.logger.Info("duplicate requestVote for same term", "term", args.Term)
 		reply.VoteGranted = false
 		return
 	}
 
 	// Increase the term if we see a newer one
-	if args.Term > rf.getCurrentTerm() {
+	if args.Term > currentTerm {
 		// Ensure transition to follower
-		//If RPC request or response contains term T > currentTerm:
-		//set currentTerm = T, convert to follower (§5.1)
+		// If RPC request or response contains term T > currentTerm:
+		// set currentTerm = T, convert to follower (§5.1)
 		rf.logger.Debug("lost leadership because received a requestVote with a newer term")
 		rf.setState(Follower)
+		// if original state is leader, notify!!
+		if isLeader {
+			rf.leaderState.stepDown <- struct{}{}
+		}
+
 		rf.setCurrentTerm(args.Term)
 		reply.Term = args.Term
 	}
@@ -347,6 +355,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 	rf.setVotedFor(candidate)
 
+	rf.persist()
 	// you grant a vote to another peer. restart your election timer
 	rf.setLastContact()
 }
@@ -384,12 +393,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if rf.killed() {
 		return false
 	}
-	rf.logger.Debug("start sending an election request","from ", rf.me,"to ", server)
+	rf.logger.Debug("start sending an election request","from ", rf.me,"to ", server," current term",rf.getCurrentTerm())
 
 	//Call() sends a request and waits for a reply.
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
-	rf.logger.Debug("sending an election request returned","from ", rf.me,"to ", server)
+	rf.logger.Debug("sending an election request returned","from ", rf.me,"to ", server," current term",rf.getCurrentTerm(),
+		" RequestVoteArgs",args," RequestVoteReply",reply)
 
 	return ok
 }
@@ -423,11 +433,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.logger.Debug("check original Entries info","current node :",rf.me,"Entries:",rf.getLogEntries())
 	// add new entry
-	rf.logsLock.Lock()
-	index = len(rf.logs)
+
+	lastLogIndex,_ := rf.getLastLog()
 	// here our LogIndex start from 1 but we initialized from 0, so we add first.
 	// not that we fetch the log entry stored in Log by Log[index - 1]
-	index ++
+	index = int(lastLogIndex + 1)
 
 	entry := Log{}
 	entry.Index = uint64(index)
@@ -435,14 +445,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry.Type = LogCommand
 	entry.Data = command
 
-	rf.logs = append(rf.logs, entry)
-	rf.logsLock.Unlock()
+	rf.appendLogEntries(lastLogIndex,append([]Log{},entry))
 
 	rf.logger.Debug("check current Entries info","current node :",rf.me,"Entries:",rf.getLogEntries())
+	rf.leaderState.commitCh <- struct{}{}
 
 	rf.persist()
-	rf.leaderState.commitCh <- struct{}{}
-	return index, term, isLeader
+	return index , term, isLeader
 }
 
 //
@@ -459,12 +468,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	rf.shutdownLock.Lock()
 	defer rf.shutdownLock.Unlock()
+	rf.logger.Warn("Begin to shut down!!!!","peer",rf.me)
 	if !rf.killed() {
 		// Your code here, if desired.
 		close(rf.shutdownCh)
 		rf.setState(Shutdown)
-		rf.waitShutdown()
 		atomic.StoreInt32(&rf.dead, 1)
+		// we should do this at last to avoid block
+		rf.waitShutdown()
 	}
 }
 
@@ -504,10 +515,10 @@ func (rf *Raft) ticker() {
 // runFollower runs the main loop while in the follower state.
 func (r *Raft) runFollower(){
 	//init
-	r.setVotedFor(-1)
 	r.logger.Info("entering follower state", "follower", r.me, "leader-id", r.getLeader())
-	heartbeatTimer := randomTimeout(r.config().HeartbeatTimeout)
+	r.setVotedFor(-1)
 
+	heartbeatTimer := randomTimeout(r.config().HeartbeatTimeout)
 	for r.getState() == Follower {
 		select {
 		case <-heartbeatTimer:
@@ -519,7 +530,8 @@ func (r *Raft) runFollower(){
 			lastContact := r.LastContact()
 			if time.Now().Sub(lastContact) < hbTimeout {
 				r.logger.Info("normal heartbeat, check current state","currentTerm",r.getCurrentTerm(),
-					"votedFor",r.getVotedFor(),"leaderID",r.getLeader(),"logs",r.getLogEntries())
+					" votedFor",r.getVotedFor()," leaderID",r.getLeader(), " logs",r.getLogEntries(),
+					" commitIndex",r.getCommitIndex()," lastLogIndex",r.getLastIndex()," lastApplied",r.getLastApplied())
 				continue
 			}
 			// Heartbeat failed! Transition to the candidate state
@@ -528,6 +540,7 @@ func (r *Raft) runFollower(){
 			r.setLeader(-1)
 			r.setState(Candidate)
 		case <-r.shutdownCh:
+			r.logger.Warn("follower server shut down!!","peer",r.me)
 			return
 		}
 	}
@@ -576,6 +589,7 @@ func (r *Raft) runCandidate(){
 			r.logger.Warn("Election timeout reached, restarting election")
 			return
 		case <-r.shutdownCh:
+			r.logger.Warn("candidate server shut down!!","peer",r.me)
 			return
 		}
 	}
@@ -661,14 +675,15 @@ func (r *Raft) runLeader(){
 		// leader. Otherwise, to a client it would seem our data
 		// is extremely stale.
 		r.setLastContact()
-		// Stop replication
-		for _, p := range r.leaderState.replState {
-			close(p.stopCh)
-		}
-		//all of the stepDown in followerReplication are controlled by leaderState
 		close(r.leaderState.stepDown)
-
-		r.leaderState.waitStepDown()
+		close(r.leaderState.commitCh)
+		for serverID, repl := range r.leaderState.replState{
+			// drain out before close the trigger channel!!!
+			repl.drainTriggerCh()
+			close(repl.triggerCh)
+			r.logger.Warn("s.triggerCh closed","peer",serverID)
+			delete(r.leaderState.replState, serverID)
+		}
 		// Clear all the state
 		r.leaderState.nextIndex = nil
 		r.leaderState.matchIndex = nil
@@ -690,6 +705,7 @@ func (r *Raft) runLeader(){
 	// Start a replication routine for each peer
 	r.startStopReplication()
 
+	r.logger.Info("start leaderLoop")
 	// Sit in the leader loop until we step down
 	r.leaderLoop()
 }
@@ -698,7 +714,9 @@ func (r *Raft) setupLeaderState() {
 	r.leaderState.nextIndex = make([]uint64, len(r.peers))
 	r.leaderState.matchIndex = make([]uint64, len(r.peers))
 	r.leaderState.replState = make(map[int] *followerReplication)
-	r.leaderState.stepDown = make(chan struct{})
+	// here we use buffered channel to avoid block during replication
+	r.leaderState.stepDown = make(chan struct{}, 1)
+	// buffered channel to avoid block when new command adds
 	r.leaderState.commitCh = make(chan struct{})
 	lastIdx := r.getLastIndex()
 	for i:=0; i<len(r.peers); i++ {
@@ -742,17 +760,20 @@ func (r *Raft) startStopReplication(){
 				LeaderId:     int32(r.me),
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				triggerCh:    make(chan struct{}, 1),
+				triggerCh:    make(chan struct{}, 1), // note here should be go unbuffered channel !!!!
 				LeaderCommit: r.getCommitIndex(),
 				LastContact:  time.Now(),
-				StepDown:     r.leaderState.stepDown,
-				stopCh: 	  make(chan uint64),
+				Failures:     0,
+				stopCh: 	  make(chan uint64,1),
+				stepDown:     r.leaderState.stepDown,
 			}
 			r.logger.Info("added peer, starting replication", "peer", serverID)
 			r.leaderState.replState[serverID] = s
 			// Note: here you should copy current serverID to local variable in case of concurrency!!!
 			peer := serverID
-			r.leaderState.goFunc(func() {
+			//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server;
+			//repeat during idle periods to prevent election timeouts (§5.2)
+			r.goFunc(func() {
 				r.logger.Debug("added peer ","peerId = ", peer, "args is ",s)
 				r.replicate(peer, s)
 			})
@@ -779,16 +800,29 @@ func (r *Raft) startStopReplication(){
 // leaderLoop is the hot loop for a leader. It is invoked
 // after all the various leader setup is done.
 func (r *Raft) leaderLoop() {
-
+	defer r.logger.Info("exit leaderLoop","time",time.Now()," current state",r.getState())
 	// This is only used for the first lease check, we reload lease below
 	// based on the current config value.
 	lease := time.After(r.config().LeaderLeaseTimeout)
 	for r.getState() == Leader {
 		select {
 		case <-r.leaderState.stepDown:
+			r.logger.Debug("leader state changed, turn to follower","leader",r.me)
 			r.setState(Follower)
+			//// first close commitCh to not allow new client asking
+			//close(r.leaderState.commitCh)
+			//// Make a best effort to replicate up to new index to all peers before leader stepDown
+			//for serverID, repl := range r.leaderState.replState {
+			//	// Replicate up to lastIdx and stop
+			//	r.logger.Info("exit leadership, stopping replication", "peer", serverID, "last-index", r.getLastIndex())
+			//	repl.stopCh <- r.getLastIndex()
+			//
+			//}
+			//close(r.leaderState.stepDown)
+			return
+
 		case <-lease:
-			r.logger.Debug("Check if we've exceeded the lease, potentially stepping down","leader = ",r.me)
+			r.logger.Debug("Check if we've exceeded the lease, potentially stepping down","leader ",r.me)
 			// Check if we've exceeded the lease, potentially stepping down
 			maxDiff := r.checkLeaderLease()
 
@@ -798,19 +832,28 @@ func (r *Raft) leaderLoop() {
 			if checkInterval < minCheckInterval {
 				checkInterval = minCheckInterval
 			}
-
+			r.logger.Info("check lease time","checkInterval",checkInterval)
 			// Renew the lease timer
 			lease = time.After(checkInterval)
+
 		case <-r.leaderState.commitCh:
 			r.logger.Debug("new logs added, should propagate to followers","leader ",r.me)
-			for peerID,_ :=range r.peers {
-				if peerID == r.me {
-					continue
+			// you should never get main thread blocked!!!!
+			r.goFunc(func() {
+				// in case of race condition against replicate
+				for serverID, repl := range r.leaderState.replState {
+					// double check in new thread!!!!
+					if r.getState() != Leader {
+						return
+					}
+					r.logger.Warn("send to s.triggerCh","peer",serverID)
+					// if last time the replicate goroutine cannot consume immediately, we should discard that
+					repl.drainTriggerCh()
+					repl.triggerCh <- struct{}{}
 				}
-				f := r.leaderState.replState[peerID]
-				f.triggerCh <- struct{}{}
-			}
+			})
 		case <-r.shutdownCh:
+			r.logger.Warn("leader server shut down!!","peer",r.me)
 			return
 		}
 	}
@@ -848,7 +891,7 @@ func (r *Raft) checkLeaderLease() time.Duration {
 			if diff <= 3*leaseTimeout {
 				r.logger.Warn("failed to contact", "server-id", id, "time", diff)
 			} else {
-				r.logger.Debug("failed to contact", "server-id", id, "time", diff)
+				r.logger.Error("failed to contact", "server-id", id, "time", diff)
 			}
 		}
 	}
@@ -884,7 +927,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	atomic.StoreInt32(&rf.dead, 0)
 	rf.shutdownCh = make(chan struct{})
 
-	rf.conf.Store(DefaultConfig())
+	//do not use | os.O_APPEND , we need new log every test
+	f, err := os.OpenFile(fmt.Sprintf("../log/my-raft-%d.log", me), os.O_RDWR | os.O_CREATE |os.O_TRUNC, 0666)
+	if err != nil {
+		//log.Fatalf("error opening file: %v", err)
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	rf.conf.Store(FileConfig(f))
 
 	rf.currentTerm = 0
 	rf.commitIndex = 0
@@ -893,13 +943,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.lastSnapshotIndex = 0
 	rf.lastSnapshotTerm = 0
-	rf.lastApplied = 0
+	rf.lastLogIndex = 0
 	rf.lastLogTerm = 0
 
 	rf.votedFor = -1
 	rf.logs = make([]Log,0)
 
 	rf.applyCh = applyCh
+	rf.applyLogCh = make(chan struct{})
+	rf.startApplyLogs()
 
 	rf.logger = hclog.New(&hclog.LoggerOptions{
 		Name:  fmt.Sprintf("my-raft-%d", me),

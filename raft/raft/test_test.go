@@ -295,6 +295,7 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(104, servers-1, false)
 	cfg.one(105, servers-1, false)
 
+	fmt.Printf("re-connect,time = %v...\n",time.Now())
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 

@@ -50,6 +50,11 @@ type AppendEntriesReply struct {
 	ConflictIndex uint64  // first Log Index that conflicts between follower and leader
 }
 
+func (arg AppendEntriesReply) String() string {
+	return fmt.Sprintf("ServerID = %d, Term = %d, Success = %v, ConflictTerm = %d, ConflictIndex = %d",
+		arg.ServerID,arg.Term,arg.Success,arg.ConflictTerm,arg.ConflictIndex)
+}
+
 
 func (arg AppendEntriesArgs) String() string {
 	return fmt.Sprintf("Term = %d, LeaderId = %d, PrevLogIndex = %d, PrevLogTerm = %d, LeaderCommit = %d, Entries = %s",
