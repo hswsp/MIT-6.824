@@ -73,8 +73,8 @@ func FileConfig(file io.Writer) Config {
 	return Config{
 		HeartbeatTimeout:   100 * time.Millisecond,
 		ElectionTimeout:    400 * time.Millisecond,
-		CommitTimeout:      50 * time.Millisecond,
-		LeaderLeaseTimeout: 60 * time.Millisecond,
+		CommitTimeout:      70 * time.Millisecond,
+		LeaderLeaseTimeout: 80 * time.Millisecond,
 		LogLevel:           "DEBUG",
 		LocalID:            ServerID(id),
 		LogOutput:          file,

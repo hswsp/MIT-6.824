@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	maxFailureScale = 10
+	maxFailureScale = 12
 	failureWait     = 10 * time.Millisecond
 )
 
@@ -412,7 +412,7 @@ func (r *Raft) heartbeat(id int, s *followerReplication, stopCh chan struct{}){
 		// Don't have these loops execute continuously without pausing
 		// Wait for the next heartbeat interval or forced notify
 		select {
-		case <-randomTimeout(r.config().HeartbeatTimeout / 10):
+		case <-randomTimeout(r.config().HeartbeatTimeout / 3):
 		case <-stopCh:
 			r.logger.Warn("replicate stopped heartbeat","leader",r.me," peer",id)
 			return
