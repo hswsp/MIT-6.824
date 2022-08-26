@@ -847,6 +847,7 @@ func TestFigure82C(t *testing.T) {
 			nup -= 1
 		}
 
+		fmt.Printf("check the number of servers = %v \n",nup)
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {

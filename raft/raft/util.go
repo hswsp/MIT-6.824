@@ -129,3 +129,13 @@ func backoff(base time.Duration, round, limit uint64) time.Duration {
 	}
 	return base
 }
+
+// asyncNotifyCh is used to do an async channel send
+// to a single channel without blocking.
+func asyncNotifyCh(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+

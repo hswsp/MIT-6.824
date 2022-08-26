@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"sync/atomic"
+	"time"
 )
 
 // AppendEntriesArgs is the command used to append entries to the
@@ -27,8 +28,14 @@ type RequestVoteArgs struct {
 	// Cache the latest log from LogStore
 	LastLogIndex uint64
 	LastLogTerm  uint64
-}
 
+	// for Debug
+	Time time.Time
+}
+func (arg RequestVoteArgs) String() string {
+	return fmt.Sprintf("Term = %d, CandidateId = %v, LastLogIndex = %v, LastLogTerm = %v, request Time = %v",
+		arg.Term,arg.CandidateId,arg.LastLogIndex,arg.LastLogTerm, arg.Time)
+}
 //
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
@@ -37,7 +44,14 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term uint64
 	VoteGranted bool
-	VoterID string
+	VoterID uint64
+
+	// for Debug
+	Time time.Time
+}
+func (arg RequestVoteReply) String() string {
+	return fmt.Sprintf("Term = %d, VoteGranted = %v, VoterID = %v, reply time = %v",
+		arg.Term,arg.VoteGranted,arg.VoterID, arg.Time)
 }
 
 type AppendEntriesReply struct {

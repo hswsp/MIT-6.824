@@ -253,9 +253,14 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(&rf.logs)
-	if len(data) < 1 { // bootstrap without any state?
-		return
+
+	// restore cached state
+	Entries := rf.getLogEntries()
+	if len(Entries) >0 {
+		lastLog :=  Entries[uint64(len(Entries)) - 1]
+		rf.setLastLog(lastLog.Index,lastLog.Term)
 	}
+
 }
 
 
@@ -280,7 +285,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 
-//
+// RequestVote
 // example RequestVote RPC handler.
 // requestVote is invoked when we get a request vote RPC call.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -340,6 +345,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.logger.Warn("rejecting vote request since our last term is greater",
 			"candidate", candidate, "last-term", lastTerm, "last-candidate-term", args.Term)
 		reply.VoteGranted = false
+		rf.persist()
 		return
 	}
 
@@ -347,6 +353,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.logger.Warn("rejecting vote request since our last index is greater",
 			"candidate", candidate, "last-index", lastIdx, "last-candidate-index", args.LastLogIndex)
 		reply.VoteGranted = false
+		rf.persist()
 		return
 	}
 
@@ -393,18 +400,20 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if rf.killed() {
 		return false
 	}
+	args.Time = time.Now()
 	rf.logger.Debug("start sending an election request","from ", rf.me,"to ", server," current term",rf.getCurrentTerm())
 
 	//Call() sends a request and waits for a reply.
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
+	reply.Time = time.Now()
 	rf.logger.Debug("sending an election request returned","from ", rf.me,"to ", server," current term",rf.getCurrentTerm(),
 		" RequestVoteArgs",args," RequestVoteReply",reply)
 
 	return ok
 }
 
-//
+// Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -432,8 +441,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 	rf.logger.Debug("check original Entries info","current node :",rf.me,"Entries:",rf.getLogEntries())
-	// add new entry
 
+	// add new entry
 	lastLogIndex,_ := rf.getLastLog()
 	// here our LogIndex start from 1 but we initialized from 0, so we add first.
 	// not that we fetch the log entry stored in Log by Log[index - 1]
@@ -448,13 +457,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.appendLogEntries(lastLogIndex,append([]Log{},entry))
 
 	rf.logger.Debug("check current Entries info","current node :",rf.me,"Entries:",rf.getLogEntries())
-	rf.leaderState.commitCh <- struct{}{}
+
+	// we should double check here!! in case our state has changed dueing time
+	// and rf.leaderState.commitCh thus is closed
+	// it is ok that we append the new command but not notify commitCh, in which case it will not be applied!!
+	if rf.getState() == Leader{
+		asyncNotifyCh(rf.leaderState.commitCh)
+		//rf.leaderState.commitCh <- struct{}{}
+	}
 
 	rf.persist()
 	return index , term, isLeader
 }
 
-//
+// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -475,8 +491,10 @@ func (rf *Raft) Kill() {
 		rf.setState(Shutdown)
 		atomic.StoreInt32(&rf.dead, 1)
 		// we should do this at last to avoid block
-		rf.waitShutdown()
+		rf.logger.Warn("waiting for all goroutines shutting down", "peer",rf.me)
+		//rf.waitShutdown()
 	}
+	rf.logger.Warn("server has shut down!!!!","peer",rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -548,6 +566,10 @@ func (r *Raft) runFollower(){
 
 // runCandidate runs the main loop while in the candidate state.
 func (r *Raft) runCandidate(){
+	defer func() {
+		r.logger.Info("exit Candidate state","peer",r.me)
+		asyncNotifyCh(r.killCh)
+	}()
 	//Increment currentTerm
 	term := r.getCurrentTerm() + 1
 	r.logger.Info("entering candidate state", "node", r.me, "term", term)
@@ -569,6 +591,7 @@ func (r *Raft) runCandidate(){
 				r.setState(Follower)
 				r.setCurrentTerm(vote.Term)
 				r.setLeader(-1)
+				r.persist()
 				return
 			}
 			// Check if the vote is granted
@@ -627,13 +650,20 @@ func (r *Raft) electSelf() <-chan *RequestVoteReply{
 	askPeer := func(peerId int) {
 		r.goFunc(func() {
 			voteReply := &RequestVoteReply{}
-			voteReply.VoterID = fmt.Sprintf("%d", peerId)
+			voteReply.VoterID = uint64(peerId)
 			err := r.sendRequestVote(peerId, req, voteReply)
 			if !err{
 				r.logger.Error("failed to make requestVote RPC", "target", peerId,
 					"error", err, "term", req.Term)
 				voteReply.Term = req.Term
 				voteReply.VoteGranted = false
+			}
+			// note we may be blocked here if target rf has been killed and sendRequestVote will wait,
+			// at the same time we are killed and respCh is closed before sendRequestVote returned
+			// so we need to double check our state again here
+			if r.getState() != Candidate || r.getCurrentTerm() != req.Term{
+				r.logger.Warn("obsolete request returned!!!!!!!! ignore it")
+				return
 			}
 			respCh <- voteReply
 		})
@@ -648,7 +678,7 @@ func (r *Raft) electSelf() <-chan *RequestVoteReply{
 			respCh <-&RequestVoteReply{
 				Term:        req.Term,
 				VoteGranted: true,
-				VoterID:  fmt.Sprintf("%d", serverId),
+				VoterID: uint64(serverId),
 			}
 			r.setVotedFor(int32(r.me))
 		}else{
@@ -656,6 +686,7 @@ func (r *Raft) electSelf() <-chan *RequestVoteReply{
 			askPeer(serverId)
 		}
 	}
+	r.persist()
 	return respCh
 }
 
@@ -717,7 +748,7 @@ func (r *Raft) setupLeaderState() {
 	// here we use buffered channel to avoid block during replication
 	r.leaderState.stepDown = make(chan struct{}, 1)
 	// buffered channel to avoid block when new command adds
-	r.leaderState.commitCh = make(chan struct{})
+	r.leaderState.commitCh = make(chan struct{}, 1)
 	lastIdx := r.getLastIndex()
 	for i:=0; i<len(r.peers); i++ {
 		//initialized to leader last log index + 1
@@ -777,6 +808,7 @@ func (r *Raft) startStopReplication(){
 				r.logger.Debug("added peer ","peerId = ", peer, "args is ",s)
 				r.replicate(peer, s)
 			})
+			asyncNotifyCh(s.triggerCh)
 		}else{
 			r.logger.Info("already replicate to the peer, check leader", "peer", serverID)
 			if s.getLeaderId()!= int32(serverID){
@@ -839,19 +871,17 @@ func (r *Raft) leaderLoop() {
 		case <-r.leaderState.commitCh:
 			r.logger.Debug("new logs added, should propagate to followers","leader ",r.me)
 			// you should never get main thread blocked!!!!
-			r.goFunc(func() {
-				// in case of race condition against replicate
-				for serverID, repl := range r.leaderState.replState {
-					// double check in new thread!!!!
-					if r.getState() != Leader {
-						return
-					}
-					r.logger.Warn("send to s.triggerCh","peer",serverID)
-					// if last time the replicate goroutine cannot consume immediately, we should discard that
-					repl.drainTriggerCh()
-					repl.triggerCh <- struct{}{}
+			// Notify the replicators of the new log
+			// in case of race condition against replicate
+			for serverID, repl := range r.leaderState.replState {
+				// double check in new thread!!!!
+				if r.getState() != Leader {
+					return
 				}
-			})
+				r.logger.Warn("send to s.triggerCh","peer",serverID)
+				// if last time the replicate goroutine cannot consume immediately, we should discard that
+				asyncNotifyCh(repl.triggerCh)
+			}
 		case <-r.shutdownCh:
 			r.logger.Warn("leader server shut down!!","peer",r.me)
 			return
@@ -927,7 +957,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	atomic.StoreInt32(&rf.dead, 0)
 	rf.shutdownCh = make(chan struct{})
 
-	//do not use | os.O_APPEND , we need new log every test
+	//if test persistent use | os.O_APPEND tag to save log of old killed rf
 	f, err := os.OpenFile(fmt.Sprintf("../log/my-raft-%d.log", me), os.O_RDWR | os.O_CREATE |os.O_TRUNC, 0666)
 	if err != nil {
 		//log.Fatalf("error opening file: %v", err)
@@ -945,6 +975,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastSnapshotTerm = 0
 	rf.lastLogIndex = 0
 	rf.lastLogTerm = 0
+
+	rf.killCh  = make(chan struct{})
 
 	rf.votedFor = -1
 	rf.logs = make([]Log,0)

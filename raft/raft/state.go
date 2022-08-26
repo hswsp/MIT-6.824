@@ -95,6 +95,9 @@ type raftState struct {
 
 	//dedicated thread calling r.app.apply
 	applyLogCh       chan struct{}
+
+	// killCh is used to kill all go routines when state changes
+	killCh           chan struct{}
 }
 
 // LeaderState leaderState is state that is used while we are a leader.
