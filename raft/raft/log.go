@@ -76,3 +76,65 @@ type Log struct {
 func (e Log) String() string {
 	return fmt.Sprintf("Index = %d, Term = %d, Type = %d, Data = %s", e.Index,e.Term,e.Type,e.Data)
 }
+
+// return slice of current logs
+func (r *Raft) getLogEntries() []Log{
+	r.logsLock.RLock()
+	entries :=r.logs
+	r.logsLock.RUnlock()
+	return entries
+}
+
+// return [startPos, endIndex) in logs, endIndex not included
+func (r *Raft) getLogSlices(startPos uint64,endIndex uint64) []Log{
+	r.logsLock.RLock()
+	entries :=r.logs[startPos:endIndex]
+	r.logsLock.RUnlock()
+	return entries
+}
+
+// cut logs before cutPos
+func (r *Raft) cutLogEntries(cutPos uint64)  {
+	r.logsLock.Lock()
+	defer r.logsLock.Unlock()
+	// copy on write
+	sLogs := make([]Log, 0)
+	copy(sLogs,r.logs[cutPos :])
+	r.logs = sLogs
+}
+
+//cut to logEntries[0:cutPos) and then append new logSlice
+func (r *Raft) appendLogEntries(cutPos uint64, logSlice []Log) {
+	r.logsLock.Lock()
+	defer r.logsLock.Unlock()
+	r.logs = append(r.logs[:cutPos], logSlice...)
+	lastEntry := r.logs[len(r.logs)-1]
+	r.setLastLog(lastEntry.Index,lastEntry.Term)
+}
+
+// fetch log entry by index
+func (r *Raft)getEntryByOffset(index uint64) Log{
+	r.lastLock.Lock()
+	base := r.lastSnapshotIndex
+	r.lastLock.Unlock()
+
+	r.logsLock.RLock()
+	entry := r.logs[index - base]
+	r.logsLock.RUnlock()
+	return entry
+}
+
+//get log term by index after snapshot
+func (rf *Raft) getLogTermByIndex(index uint64) uint64 {
+	rf.lastLock.Lock()
+	var offset int64
+	offset = int64(index)-int64(1 + rf.lastSnapshotIndex)
+	if offset < 0 {
+		return rf.lastSnapshotTerm
+	}
+	rf.lastLock.Unlock()
+	
+	rf.logsLock.Lock()
+	defer rf.logsLock.Unlock()
+	return rf.logs[offset].Term
+}

@@ -18,8 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
 	"bytes"
-	"encoding/gob"
 	"fmt"
 	"github.com/hashicorp/go-hclog"
 	"os"
@@ -165,30 +165,7 @@ func (r *Raft) setLeader(s int32) {
 	atomic.StoreInt32(stateAddr, s)
 }
 
-// return slice of current logs
-func (r *Raft) getLogEntries() []Log{
-	r.logsLock.RLock()
-	entries :=r.logs
-	r.logsLock.RUnlock()
-	return entries
-}
-// return [startPos, endIndex) in logs, endIndex not included
-func (r *Raft) getLogSlices(startPos uint64,endIndex uint64) []Log{
-	r.logsLock.RLock()
-	entries :=r.logs[startPos:endIndex]
-	r.logsLock.RUnlock()
-	return entries
-}
-//cut logEntries[0:cutPos) and then append logSlice
-func (r *Raft) appendLogEntries(cutPos uint64, logSlice []Log) {
-	r.logsLock.Lock()
-	defer r.logsLock.Unlock()
-	r.logs = append(r.logs[:cutPos], logSlice...)
-	lastEntry := r.logs[len(r.logs)-1]
-	r.setLastLog(lastEntry.Index,lastEntry.Term)
-}
-
-// return currentTerm and whether this server
+// GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	var term int
@@ -209,6 +186,18 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
+func (rf *Raft) persistData() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	e.Encode(rf.lastSnapshotIndex)
+	e.Encode(rf.lastSnapshotTerm)
+	data := w.Bytes()
+	return data
+}
+
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -218,15 +207,9 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.logs)
-	data := w.Bytes()
+	data := rf.persistData()
 	rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -249,10 +232,12 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 	r := bytes.NewBuffer(data)
-	d := gob.NewDecoder(r)
+	d := labgob.NewDecoder(r)
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(&rf.logs)
+	d.Decode(&rf.lastSnapshotIndex)
+	d.Decode(&rf.lastSnapshotTerm)
 
 	// restore cached state
 	Entries := rf.getLogEntries()
@@ -264,7 +249,7 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 
-//
+// CondInstallSnapshot
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 //
@@ -275,13 +260,50 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
+// The purpose of this function is to discard the log installed in the snapshot,
+// install the snapshot data, and update the snapshot index at the same time.
+// the peers update itself actively, and does not conflict with the snapshot sent by the leader.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	if rf.killed() {
+		return
+	}
+	rf.logger.Info("service begin save snapshot", "peer",rf.me,"input index",index)
+	rf.logger.Debug("Snapshot check committed info","commintIndex",rf.getCommitIndex(),"lastApplied",rf.getLastApplied())
+	lastIncludeIndex,_ :=rf.getLastSnapshot()
+	//its own snapshot point >= index, it means that no installation is required.
+	if lastIncludeIndex >= uint64(index) {
+		return
+	}
+	// the snapshot cannot be installed if it has not been submitted.
+	if uint64(index) >=rf.getCommitIndex(){
+		return
+	}
+	currentLogs := rf.getLogEntries()
+	// update snapshot
+	offsetIndex := uint64(index) - lastIncludeIndex
+	// update lastSnapshotIndex/term
+	newLastIncludedTerm := currentLogs[offsetIndex - 1].Term
 
+	// last snapshot including index, so + 1. but the offset should be index - 1
+	rf.cutLogEntries(offsetIndex)
+	rf.logger.Info("check curIndex, lastIncludeIndex","index",index,"lastIncludeIndex",lastIncludeIndex)
+	rf.setLastSnapshot(uint64(index),newLastIncludedTerm)
+
+	//reset commitIndex、lastApplied
+	if uint64(index) > rf.getCommitIndex() {
+		rf.setCommitIndex(uint64(index))
+	}
+	// Update the lastApplied so we don't replay old logs
+	if uint64(index) > rf.getLastApplied() {
+		rf.setLastApplied(uint64(index))
+	}
+	// Persistent snapshot information
+	rf.persister.SaveStateAndSnapshot(rf.persistData(), snapshot)
 }
 
 

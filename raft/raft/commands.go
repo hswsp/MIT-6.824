@@ -6,17 +6,6 @@ import (
 	"time"
 )
 
-// AppendEntriesArgs is the command used to append entries to the
-// replicated log.
-type AppendEntriesArgs struct {
-	Term         uint64
-	LeaderId     int32
-	PrevLogIndex uint64 //index of log entry immediately preceding new ones
-	PrevLogTerm  uint64 //term of prevLogIndex entry
-	Entries      []Log
-	LeaderCommit uint64
-}
-
 // RequestVoteArgs
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -54,6 +43,23 @@ func (arg RequestVoteReply) String() string {
 		arg.Term,arg.VoteGranted,arg.VoterID, arg.Time)
 }
 
+// AppendEntriesArgs is the command used to append entries to the
+// replicated log.
+type AppendEntriesArgs struct {
+	Term         uint64
+	LeaderId     int32
+	PrevLogIndex uint64 //index of log entry immediately preceding new ones
+	PrevLogTerm  uint64 //term of prevLogIndex entry
+	Entries      []Log
+	LeaderCommit uint64
+}
+
+func (arg AppendEntriesArgs) String() string {
+	return fmt.Sprintf("Term = %d, LeaderId = %d, PrevLogIndex = %d, PrevLogTerm = %d, LeaderCommit = %d, Entries = %s",
+		arg.Term,arg.LeaderId,arg.PrevLogIndex,arg.PrevLogTerm,arg.LeaderCommit,arg.Entries)
+}
+
+
 type AppendEntriesReply struct {
 	ServerID      int
 	Term          uint64
@@ -69,10 +75,36 @@ func (arg AppendEntriesReply) String() string {
 		arg.ServerID,arg.Term,arg.Success,arg.ConflictTerm,arg.ConflictIndex)
 }
 
+// InstallSnapshotRequest is the command sent to a Raft peer to bootstrap its
+// log (and state machine) from a snapshot on another peer.
+type InstallSnapshotRequest struct {
+	Term        uint64
+	LeaderId    int32    // LeaderId of request
 
-func (arg AppendEntriesArgs) String() string {
-	return fmt.Sprintf("Term = %d, LeaderId = %d, PrevLogIndex = %d, PrevLogTerm = %d, LeaderCommit = %d, Entries = %s",
-		arg.Term,arg.LeaderId,arg.PrevLogIndex,arg.PrevLogTerm,arg.LeaderCommit,arg.Entries)
+	// These are the last index/term included in the snapshot
+	LastLogIndex uint64
+	LastLogTerm  uint64
+
+	// Raw byte stream data of snapshot
+	Data         []byte
+
+	// Size of the snapshot
+	Size         int64
+}
+
+func (arg InstallSnapshotRequest) String() string {
+	return fmt.Sprintf("Term = %d, LeaderId = %d, LastLogIndex = %d, LastLogTerm = %d, Data = %v, Size = %d",
+		arg.Term,arg.LeaderId,arg.LastLogIndex,arg.LastLogTerm,arg.Data,arg.Size)
+}
+// InstallSnapshotReply is the response returned from an
+// InstallSnapshotRequest.
+type InstallSnapshotReply struct {
+	Term    uint64
+	Success bool
+}
+func (arg InstallSnapshotReply) String() string {
+	return fmt.Sprintf("Term = %d, Success = %v",
+		arg.Term,arg.Success)
 }
 
 func (s *AppendEntriesArgs) getLeaderId() int32 {

@@ -121,7 +121,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Increase the term if we see a newer one, also transition to follower
 	// if we ever get an appendEntries call
-	if args.Term > rf.getCurrentTerm() || rf.getState() != Follower {
+	if args.Term > currentTerm || rf.getState() != Follower {
 		// Ensure transition to follower
 		rf.setState(Follower)
 		rf.setCurrentTerm(args.Term)
@@ -305,6 +305,18 @@ BACKTRACK:
 			"peer",r.me,"current term",r.getCurrentTerm()," Replication RPC term",s.Term)
 		return true
 	}
+
+	// installSnapshot，The follower's log is smaller than leader's snapshot state,
+	// send snapshot to the peer
+	nextIndex,_ := r.leaderState.getState(serverID)
+	lastIncludeIndex,_ :=r.getLastSnapshot()
+	if nextIndex < lastIncludeIndex{
+		r.logger.Info("installSnapshot to followers","leader",r.me," peer",serverID,
+			"current term",r.getCurrentTerm()," Replication RPC term",s.Term)
+		r.goFunc(func() {r.leaderSendSnapShot(serverID)})
+		return shouldStop
+	}
+
 	// each command is sent to each peer just once.
 	args  := r.updateLastAppended(serverID,lastIndex,s)
 	r.logger.Debug("updated followerReplication of AppendEntries RPCs","peer", serverID,
@@ -457,6 +469,18 @@ func (r *Raft) heartbeat(id int, s *followerReplication, stopCh chan struct{}){
 			r.logger.Warn("close heartbeat due to transferring to follower")
 			return
 		}
+
+
+		// installSnapshot，The follower's log is smaller than leader's snapshot state,
+		// send snapshot to the peer
+		nextIndex,_ := r.leaderState.getState(id)
+		lastIncludeIndex,_ :=r.getLastSnapshot()
+		if nextIndex < lastIncludeIndex{
+			r.logger.Info("installSnapshot to followers","leader",r.me," peer",id,
+				"current term",r.getCurrentTerm()," Replication RPC term",s.Term)
+			r.goFunc(func() {r.leaderSendSnapShot(id)})
+			return
+		}
 		//r.updateHeartbeatInfo(id,s)
 		args  := r.updateLastAppended(id,r.getLastIndex(),s)
 
@@ -607,6 +631,7 @@ func (rf *Raft) startApplyLogs() {
 
 					msg := ApplyMsg{}
 					msg.CommandValid = true
+					msg.CommandValid = false
 					msg.CommandIndex = int(newLastApplied)
 
 					rf.logsLock.RLock()
