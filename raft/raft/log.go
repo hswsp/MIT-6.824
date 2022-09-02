@@ -128,12 +128,12 @@ func (r *Raft)getEntryByOffset(index uint64) Log{
 func (rf *Raft) getLogTermByIndex(index uint64) uint64 {
 	rf.lastLock.Lock()
 	var offset int64
-	offset = int64(index)-int64(1 + rf.lastSnapshotIndex)
+	offset = int64(index)-int64(1 + rf.lastSnapshotIndex)  // may overflow here, caution!!!!
 	if offset < 0 {
 		return rf.lastSnapshotTerm
 	}
 	rf.lastLock.Unlock()
-	
+
 	rf.logsLock.Lock()
 	defer rf.logsLock.Unlock()
 	return rf.logs[offset].Term
