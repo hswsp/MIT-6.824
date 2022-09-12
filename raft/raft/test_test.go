@@ -295,7 +295,6 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(104, servers-1, false)
 	cfg.one(105, servers-1, false)
 
-	fmt.Printf("re-connect,time = %v...\n",time.Now())
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
@@ -847,7 +846,6 @@ func TestFigure82C(t *testing.T) {
 			nup -= 1
 		}
 
-		fmt.Printf("check the number of servers = %v \n",nup)
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {

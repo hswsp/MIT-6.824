@@ -88,27 +88,62 @@ func (r *Raft) getLogEntries() []Log{
 // return [startPos, endIndex) in logs, endIndex not included
 func (r *Raft) getLogSlices(startPos uint64,endIndex uint64) []Log{
 	r.logsLock.RLock()
+	base := r.lastSnapshotIndex
+	r.logger.Info("check index","lastSnapshotIndex",base,"startPos",startPos,"endIndex",endIndex)
+	startPos = startPos - base
+	endIndex = endIndex - base
 	entries :=r.logs[startPos:endIndex]
 	r.logsLock.RUnlock()
 	return entries
 }
 
 // cut logs before cutPos
-func (r *Raft) cutLogEntries(cutPos uint64)  {
+// condition: lastIncludeIndex < includeIndex
+func (r *Raft) updateLastSnapshot(includeIndex uint64)  {
+
+	// we agree on lock order: first lastLock, then logsLock to avoid dead lock
+	r.lastLock.Lock()
+	defer r.lastLock.Unlock()
+
+	lastIncludeIndex := r.lastSnapshotIndex
+
+	//find offset of log includeIndex
+	offsetIndex := int64(includeIndex) - int64(1 + lastIncludeIndex)
+	// last snapshot including index, so + 1.
+	cutPos := uint64(offsetIndex + 1)
+
 	r.logsLock.Lock()
-	defer r.logsLock.Unlock()
 	// copy on write
+	currentLogs :=r.logs
+	newIncludedTerm := currentLogs[offsetIndex].Term
+
+	r.logger.Warn("check log array before cut","current logs",r.logs,"cutPos",cutPos)
+	originLen := uint64(len(currentLogs))
 	sLogs := make([]Log, 0)
-	copy(sLogs,r.logs[cutPos :])
+	if cutPos < originLen {
+		sLogs = append(sLogs, r.logs[cutPos:]...)
+	}
 	r.logs = sLogs
+	r.logger.Warn("check log array after cut","current logs",r.logs)
+	r.logsLock.Unlock()
+
+	// update lastSnapshotIndex/term
+	r.lastSnapshotIndex = includeIndex
+	r.lastSnapshotTerm = newIncludedTerm
+
 }
 
-//cut to logEntries[0:cutPos) and then append new logSlice
-func (r *Raft) appendLogEntries(cutPos uint64, logSlice []Log) {
+//cut logEntries to cutLogIndex(not included) and then append new logSlice
+func (r *Raft) appendLogEntries(cutLogIndex uint64, logSlice []Log) {
+	//check base before append
+	base,_ := r.getLastSnapshot()
+	cutPos := cutLogIndex - base - 1
+
 	r.logsLock.Lock()
-	defer r.logsLock.Unlock()
 	r.logs = append(r.logs[:cutPos], logSlice...)
 	lastEntry := r.logs[len(r.logs)-1]
+	r.logsLock.Unlock()
+
 	r.setLastLog(lastEntry.Index,lastEntry.Term)
 }
 
@@ -119,7 +154,8 @@ func (r *Raft)getEntryByOffset(index uint64) Log{
 	r.lastLock.Unlock()
 
 	r.logsLock.RLock()
-	entry := r.logs[index - base]
+	r.logger.Info("check current index","base",base,"input index",index,"current logs",r.logs)
+	entry := r.logs[index - base - 1]
 	r.logsLock.RUnlock()
 	return entry
 }
@@ -127,9 +163,11 @@ func (r *Raft)getEntryByOffset(index uint64) Log{
 //get log term by index after snapshot
 func (rf *Raft) getLogTermByIndex(index uint64) uint64 {
 	rf.lastLock.Lock()
+	rf.logger.Info("getLogTermByIndex check index","index",index,"lastSnapshotIndex",rf.lastSnapshotIndex)
 	var offset int64
 	offset = int64(index)-int64(1 + rf.lastSnapshotIndex)  // may overflow here, caution!!!!
 	if offset < 0 {
+		rf.lastLock.Unlock()
 		return rf.lastSnapshotTerm
 	}
 	rf.lastLock.Unlock()

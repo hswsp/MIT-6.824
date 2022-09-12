@@ -90,6 +90,9 @@ type InstallSnapshotRequest struct {
 
 	// Size of the snapshot
 	Size         int64
+
+	// true if this is the last chunk
+	Done         bool
 }
 
 func (arg InstallSnapshotRequest) String() string {

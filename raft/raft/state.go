@@ -80,8 +80,8 @@ type raftState struct {
 	lastLock sync.Mutex
 
 	// Cache the latest snapshot index/term
-	lastSnapshotIndex uint64
-	lastSnapshotTerm  uint64
+	lastSnapshotIndex uint64  //lastIncludedIndex
+	lastSnapshotTerm  uint64  //lastIncludedTerm
 
 	// Cache the latest log that in Persistent state (stored in FSM)
 	lastLogIndex uint64

@@ -94,9 +94,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.logger.Info("======= got AppendEntries =======","Server ", rf.me,"from leader ", args.LeaderId, ", args: ", args,", current term: ", rf.currentTerm, ", " +
 		"current commitIndex: ",rf.commitIndex,", current log: ", rf.getLogEntries())
 
-	defer rf.logger.Info("======= finished AppendEntries =======","server ", rf.me," from leader ", args.LeaderId,", args: ", args,", current log: ", rf.getLogEntries(),
-		", reply:", reply)
-
 	if rf.killed() {
 		reply.Term = 0
 		reply.Success = false
@@ -105,7 +102,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	currentTerm := rf.getCurrentTerm()
 	originLogEntries := rf.getLogEntries()
-	originLogEntryLen := uint64(len(originLogEntries))
+	// we fetch them in a same lock.
+	rf.lastLock.Lock()
+	lastLogIndex := rf.lastLogIndex
+	lastSnapshotIndex :=rf.lastSnapshotIndex
+	if lastLogIndex < lastSnapshotIndex{
+		lastLogIndex = lastSnapshotIndex
+	}
+	rf.lastLock.Unlock()
 
 	reply.ServerID = rf.me
 	// Reply false if term < currentTerm (§5.1)
@@ -128,13 +132,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = args.Term
 	}
 
+	rf.logger.Info("check index","PrevLogIndex",args.PrevLogIndex,"lastLogIndex",lastSnapshotIndex,
+		"lastSnapshotIndex",lastSnapshotIndex)
 	//Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if originLogEntryLen < args.PrevLogIndex {
+	if lastSnapshotIndex > args.PrevLogIndex || lastLogIndex < args.PrevLogIndex {
 		reply.Term = currentTerm
 		reply.Success = false
 		// If a follower does not have prevLogIndex in its log
-		// it should return with conflictIndex = len(log) + 1 and conflictTerm = None
-		reply.ConflictIndex = originLogEntryLen + 1
+		// it should return with conflictIndex = lastLogIndex + 1 and conflictTerm = None
+		reply.ConflictIndex = lastLogIndex + 1
 		reply.ConflictTerm = 0 //represent conflictTerm = None.
 
 		rf.persist()
@@ -144,7 +150,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	prevLogTerm := uint64(0)
 	// PrevLogIndex default 0 means no LogEntries
 	if args.PrevLogIndex > 0 {
-		prevLogTerm = originLogEntries[args.PrevLogIndex-1].Term
+		// prevLogTerm = originLogEntries[args.PrevLogIndex-1].Term
+		prevLogTerm = rf.getLogTermByIndex(args.PrevLogIndex)
 	}
 
 	if args.PrevLogTerm != prevLogTerm {
@@ -165,30 +172,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// If an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it (§5.3)
-	argsEntryLen := uint64(len(args.Entries))
+	argsEntryLen := int64(len(args.Entries))
+	originLogEntryLen := int64(len(originLogEntries))
 
 	// if args.PrevLogIndex = 0, which means no prev entry, the last new entry index is argsEntryLen
 	// otherwise it is args.PrevLogIndex - 1 + argsEntryLen
 	// actual index of start of new Entries, should be Entries[0].Index - 1
-	newEntriesStartIndex := args.PrevLogIndex
+	newEntriesStartOffset := int64(args.PrevLogIndex) - int64(lastSnapshotIndex) // convert to offset
+	if newEntriesStartOffset < 0 {
+		newEntriesStartOffset = 0
+	}
 
-	// A good example of conflictIndex is 1, because args.Entries[0].Term = rf.logs[args.PrevLogIndex-1].Term
-	conflictIndex := uint64(0)
-	for conflictIndex < argsEntryLen && (newEntriesStartIndex+ conflictIndex < originLogEntryLen) {
-		if args.Entries[conflictIndex].Term != originLogEntries[newEntriesStartIndex+ conflictIndex].Term {
+	// A good example of conflictOffset is 1, because args.Entries[0].Term = rf.logs[args.PrevLogIndex-1].Term
+	conflictOffset := int64(0)
+	for conflictOffset < argsEntryLen && (newEntriesStartOffset+ conflictOffset < originLogEntryLen) {
+		if args.Entries[conflictOffset].Term != originLogEntries[newEntriesStartOffset+ conflictOffset].Term {
 			break
 		}
-		conflictIndex++
+		conflictOffset++
 	}
-	rf.logger.Debug("follower check appending logs","newEntriesStartIndex", newEntriesStartIndex,
-		"conflictIndex",conflictIndex,"argsEntryLen",argsEntryLen)
+	rf.logger.Debug("follower check appending logs","newEntriesStartOffset", newEntriesStartOffset,
+		"conflictOffset",conflictOffset,"argsEntryLen",argsEntryLen)
 
 	// If the follower has all the entries the leader sent, the follower MUST NOT truncate its log.
 	// Any elements following the entries sent by the leader MUST be kept.
 	// This is because we could be receiving an outdated AppendEntries RPC from the leader
-	if conflictIndex < argsEntryLen{
+	if conflictOffset < argsEntryLen{
 		rf.logger.Debug("follower start appending logs","peer",rf.me," entries ",args.Entries)
-		rf.appendLogEntries(newEntriesStartIndex+ conflictIndex,args.Entries[conflictIndex:])
+		newEntriesCutIndex := uint64(newEntriesStartOffset + conflictOffset) + 1 + lastSnapshotIndex
+		rf.appendLogEntries(newEntriesCutIndex,args.Entries[conflictOffset:])
 	}
 
 	//update the logs
@@ -210,6 +222,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.applyLogCh <- struct{}{}
 	//restart your election timer if you get an AppendEntries RPC from the current leader
 	rf.setLastContact()
+
+	rf.logger.Info("======= finished AppendEntries =======","server ", rf.me," from leader ", args.LeaderId,", args: ", args,", current log: ", rf.getLogEntries(),
+		", reply:", reply)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -233,7 +248,9 @@ func getConflictTermIndex(conflictTerm uint64,logEntries []Log) uint64 {
 	conflictIndex := uint64(0)
 	for i:=0; i<len(logEntries); i++ {
 		if logEntries[i].Term == conflictTerm {
-			conflictIndex = uint64(i + 1)
+			//conflictIndex = uint64(i + 1)
+			// conflictIndex is the actual index of the log !
+			conflictIndex = logEntries[i].Index
 			break
 		}
 	}
@@ -306,12 +323,12 @@ BACKTRACK:
 		return true
 	}
 
-	// installSnapshot，The follower's log is smaller than leader's snapshot state,
+	// InstallSnapShot，The follower's log is smaller than leader's snapshot state,
 	// send snapshot to the peer
 	nextIndex,_ := r.leaderState.getState(serverID)
 	lastIncludeIndex,_ :=r.getLastSnapshot()
 	if nextIndex < lastIncludeIndex{
-		r.logger.Info("installSnapshot to followers","leader",r.me," peer",serverID,
+		r.logger.Info("InstallSnapShot to followers","leader",r.me," peer",serverID,
 			"current term",r.getCurrentTerm()," Replication RPC term",s.Term)
 		r.goFunc(func() {r.leaderSendSnapShot(serverID)})
 		return shouldStop
@@ -432,7 +449,8 @@ func (r *Raft) updateHeartbeatInfo(serverID int,s *followerReplication){
 	// default 0 if no LogEntries
 	prevLogTerm := uint64(0)
 	if prevLogIndex > 0 {
-		prevLogTerm = r.getLogEntries()[prevLogIndex - 1].Term
+		//prevLogTerm = r.getLogEntries()[prevLogIndex - 1].Term
+		prevLogTerm = r.getLogTermByIndex(prevLogIndex)
 	}
 	r.logger.Debug("updateHeartbeatInfo check current rf state"," nextIndex",nextIndex," prevLogTerm",prevLogTerm)
 
@@ -470,13 +488,12 @@ func (r *Raft) heartbeat(id int, s *followerReplication, stopCh chan struct{}){
 			return
 		}
 
-
-		// installSnapshot，The follower's log is smaller than leader's snapshot state,
+		// InstallSnapShot，The follower's log is smaller than leader's snapshot state,
 		// send snapshot to the peer
 		nextIndex,_ := r.leaderState.getState(id)
 		lastIncludeIndex,_ :=r.getLastSnapshot()
 		if nextIndex < lastIncludeIndex{
-			r.logger.Info("installSnapshot to followers","leader",r.me," peer",id,
+			r.logger.Info("InstallSnapShot to followers","leader",r.me," peer",id,
 				"current term",r.getCurrentTerm()," Replication RPC term",s.Term)
 			r.goFunc(func() {r.leaderSendSnapShot(id)})
 			return
@@ -527,6 +544,7 @@ func (r *Raft) processAppendEntries(nodeId int, rpcArg *AppendEntriesArgs) RPCSt
 	// since we may already changed to the follower but the heartbeat does not return !!
 	currentTerm := rpcArg.Term
 	currentLogs := r.getLogEntries()
+	base,_ := r.getLastSnapshot()
 
 	r.logger.Debug("receive AppendEntriesRPC, check args data and reply data","from",nodeId,", rpcArg",rpcArg,", reply",reply)
 	//If RPC request or response contains term T > currentTerm:
@@ -567,12 +585,14 @@ func (r *Raft) processAppendEntries(nodeId int, rpcArg *AppendEntriesArgs) RPCSt
 		r.leaderState.indexLock.Lock()
 		copy(copyMatchIndex, r.leaderState.matchIndex)
 		r.leaderState.indexLock.Unlock()
-		copyMatchIndex[r.me] = uint64(len(currentLogs))
+		copyMatchIndex[r.me] = r.getLastIndex()
 		//sort and get the middle to judge the majority
 		sort.Slice(copyMatchIndex, copyMatchIndex.Less)
 		N := copyMatchIndex[len(r.peers)/2]
 		r.logger.Debug("check returned matchIndex","copyMatchIndex",copyMatchIndex)
-		if N > r.getCommitIndex() && currentLogs[N-1].Term == currentTerm {
+		// convert to offset due to log compact
+		offset := N - 1 - base
+		if N > r.getCommitIndex() && currentLogs[offset].Term == currentTerm {
 			r.setCommitIndex(N)
 		}
 		//check for commitIndex > lastLogIndex after commitIndex is updated
@@ -586,11 +606,11 @@ func (r *Raft) processAppendEntries(nodeId int, rpcArg *AppendEntriesArgs) RPCSt
 		r.logger.Info("start log backtracking","ConflictIndex",reply.ConflictIndex," ConflictTerm",reply.ConflictTerm," current logs",r.getLogEntries())
 		// The accelerated log backtracking optimization
 		// Upon receiving a conflict response, the leader should first search its log for conflictTerm.
-		upperbound, founded := r.lastConfictTermIndex(reply.ConflictTerm)
+		upperboundIndex, founded := r.lastConfictTermIndex(reply.ConflictTerm)
 		if founded {
 			// If it finds an entry in its log with ConflictTerm,
 			// it should set nextIndex as the one beyond the index of the last entry in that term in its log.
-			r.leaderState.setNextIndex(reply.ServerID, upperbound)
+			r.leaderState.setNextIndex(reply.ServerID, upperboundIndex)
 		} else {
 			r.leaderState.setNextIndex(reply.ServerID, reply.ConflictIndex)
 		}
@@ -607,7 +627,8 @@ func (r *Raft) lastConfictTermIndex(conflictTerm uint64) (uint64,bool) {
 			founded = true
 		}
 		if entries[i].Term > conflictTerm{
-			return uint64(i + 1),founded
+			//return uint64(i + 1),founded
+			return entries[i].Index,founded
 		}
 	}
 	return 0,founded
@@ -631,13 +652,15 @@ func (rf *Raft) startApplyLogs() {
 
 					msg := ApplyMsg{}
 					msg.CommandValid = true
-					msg.CommandValid = false
+					msg.SnapshotValid = false
 					msg.CommandIndex = int(newLastApplied)
 
-					rf.logsLock.RLock()
-					entry := rf.logs[newLastApplied-1]
+					//rf.logsLock.RLock()
+					//entry := rf.logs[newLastApplied-1]
+					//msg.Command = entry.Data
+					//rf.logsLock.RUnlock()
+					entry := rf.getEntryByOffset(newLastApplied)
 					msg.Command = entry.Data
-					rf.logsLock.RUnlock()
 
 					// Update the last log since it's on disk now
 					rf.logger.Debug("committed, check entry index","newLastApplied",newLastApplied,"LastApplied entry",entry)

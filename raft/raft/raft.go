@@ -18,8 +18,8 @@ package raft
 //
 
 import (
-	"6.824/labgob"
 	"bytes"
+	"encoding/gob"
 	"fmt"
 	"github.com/hashicorp/go-hclog"
 	"os"
@@ -188,7 +188,7 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persistData() []byte {
 	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
+	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
@@ -232,7 +232,7 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
+	d := gob.NewDecoder(r)
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.votedFor)
 	d.Decode(&rf.logs)
@@ -272,9 +272,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if rf.killed() {
 		return
 	}
-	rf.logger.Info("service begin save snapshot", "peer",rf.me,"input index",index)
+	rf.logger.Info("service begin save snapshot", "peer",rf.me)
 	rf.logger.Debug("Snapshot check committed info","commintIndex",rf.getCommitIndex(),"lastApplied",rf.getLastApplied())
+
 	lastIncludeIndex,_ :=rf.getLastSnapshot()
+	rf.logger.Info("check curIndex, lastIncludeIndex","input index",index,"lastIncludeIndex",lastIncludeIndex)
 	//its own snapshot point >= index, it means that no installation is required.
 	if lastIncludeIndex >= uint64(index) {
 		return
@@ -283,21 +285,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if uint64(index) >=rf.getCommitIndex(){
 		return
 	}
-	currentLogs := rf.getLogEntries()
-	// update snapshot
-	offsetIndex := uint64(index) - lastIncludeIndex
-	// update lastSnapshotIndex/term
-	newLastIncludedTerm := currentLogs[offsetIndex - 1].Term
 
-	// last snapshot including index, so + 1. but the offset should be index - 1
-	rf.cutLogEntries(offsetIndex)
-	rf.logger.Info("check curIndex, lastIncludeIndex","index",index,"lastIncludeIndex",lastIncludeIndex)
-	rf.setLastSnapshot(uint64(index),newLastIncludedTerm)
+	// update snapshot, cut rf.logs to index
+	rf.updateLastSnapshot(uint64(index))
 
-	//reset commitIndex、lastApplied
-	if uint64(index) > rf.getCommitIndex() {
-		rf.setCommitIndex(uint64(index))
-	}
 	// Update the lastApplied so we don't replay old logs
 	if uint64(index) > rf.getLastApplied() {
 		rf.setLastApplied(uint64(index))
@@ -315,8 +306,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	candidate := args.CandidateId
 	rf.logger.Info("======= got RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
 		", args: ", args,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
-	defer rf.logger.Info("======= finished RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
-		", reply: ", reply,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
 
 	// current node crash
 	if rf.killed() {
@@ -325,8 +314,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	currentTermInt,isLeader := rf.GetState()
-	currentTerm := uint64(currentTermInt)
+	//currentTermInt,isLeader := rf.GetState()
+	//currentTerm := uint64(currentTermInt)
+	currentTerm :=rf.getCurrentTerm()
 	// reply term should be currentTerm
 	reply.Term = currentTerm
 
@@ -353,9 +343,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.logger.Debug("lost leadership because received a requestVote with a newer term")
 		rf.setState(Follower)
 		// if original state is leader, notify!!
-		if isLeader {
-			rf.leaderState.stepDown <- struct{}{}
-		}
+		//if isLeader {asyncNotifyCh(rf.leaderState.stepDown)}
 
 		rf.setCurrentTerm(args.Term)
 		reply.Term = args.Term
@@ -363,6 +351,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Reject if their term is older
 	lastIdx, lastTerm := rf.getLastEntry()
+	rf.logger.Info("compare term","lastTerm",lastTerm,"args.LastLogTerm",args.LastLogTerm)
 	if lastTerm > args.LastLogTerm {
 		rf.logger.Warn("rejecting vote request since our last term is greater",
 			"candidate", candidate, "last-term", lastTerm, "last-candidate-term", args.Term)
@@ -387,6 +376,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.persist()
 	// you grant a vote to another peer. restart your election timer
 	rf.setLastContact()
+
+	rf.logger.Info("======= finished RequestVote  =======","Server[", rf.me,"]: from candidate ",candidate,
+		", reply: ", reply,", current currentTerm: ",rf.getCurrentTerm(),", current log: ",rf.logs)
 }
 
 //
@@ -476,7 +468,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry.Type = LogCommand
 	entry.Data = command
 
-	rf.appendLogEntries(lastLogIndex,append([]Log{},entry))
+	rf.appendLogEntries(uint64(index),append([]Log{},entry))
 
 	rf.logger.Debug("check current Entries info","current node :",rf.me,"Entries:",rf.getLogEntries())
 
@@ -489,6 +481,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.persist()
+
 	return index , term, isLeader
 }
 
@@ -569,8 +562,10 @@ func (r *Raft) runFollower(){
 			// Check if we have had a successful contact
 			lastContact := r.LastContact()
 			if time.Now().Sub(lastContact) < hbTimeout {
+				lastSnapshotIndex,_ := r.getLastSnapshot()
 				r.logger.Info("normal heartbeat, check current state","currentTerm",r.getCurrentTerm(),
-					" votedFor",r.getVotedFor()," leaderID",r.getLeader(), " logs",r.getLogEntries(),
+					" votedFor",r.getVotedFor()," leaderID",r.getLeader(),
+					"lastSnapshotIndex",lastSnapshotIndex, " logs",r.getLogEntries(),
 					" commitIndex",r.getCommitIndex()," lastLogIndex",r.getLastIndex()," lastApplied",r.getLastApplied())
 				continue
 			}
@@ -704,7 +699,7 @@ func (r *Raft) electSelf() <-chan *RequestVoteReply{
 			}
 			r.setVotedFor(int32(r.me))
 		}else{
-			r.logger.Debug(" asking for vote","node ",r.me,  "term", req.Term, "from", serverId)
+			r.logger.Debug("asking for vote","node ",r.me,  "term", req.Term, "from", serverId)
 			askPeer(serverId)
 		}
 	}
@@ -801,7 +796,8 @@ func (r *Raft) startStopReplication(){
 		//term of prevLogIndex entry
 		prevLogTerm := uint64(0)
 		if prevLogIndex > 0 {
-			prevLogTerm = r.logs[prevLogIndex - 1].Term
+			//prevLogTerm = r.logs[prevLogIndex - 1].Term
+			prevLogTerm = r.getLogTermByIndex(prevLogIndex)
 		}
 		r.mu.Unlock()
 
@@ -980,7 +976,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.shutdownCh = make(chan struct{})
 
 	//if test persistent use | os.O_APPEND tag to save log of old killed rf
-	f, err := os.OpenFile(fmt.Sprintf("../log/my-raft-%d.log", me), os.O_RDWR | os.O_CREATE |os.O_TRUNC, 0666)
+	f, err := os.OpenFile(fmt.Sprintf("../log/my-raft-%d.log", me), os.O_RDWR | os.O_CREATE | os.O_APPEND , 0666) //|os.O_TRUNC
 	if err != nil {
 		//log.Fatalf("error opening file: %v", err)
 		fmt.Println(err)
@@ -1003,10 +999,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.logs = make([]Log,0)
 
-	rf.applyCh = applyCh
-	rf.applyLogCh = make(chan struct{})
-	rf.startApplyLogs()
-
 	rf.logger = hclog.New(&hclog.LoggerOptions{
 		Name:  fmt.Sprintf("my-raft-%d", me),
 		Level: hclog.LevelFromString(rf.config().LogLevel),
@@ -1015,6 +1007,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	// Synchronize snapshot information
+	lastIncludedIndex,_ := rf.getLastSnapshot()
+	if lastIncludedIndex > 0 {
+		rf.setLastApplied(lastIncludedIndex)
+	}
+
+	rf.applyCh = applyCh
+	rf.applyLogCh = make(chan struct{})
+	rf.startApplyLogs()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

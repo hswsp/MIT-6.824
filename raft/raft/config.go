@@ -142,16 +142,14 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
-	//		log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
 	}
-	//fmt.Printf("checkLogs cfg.logs = %v...\n", cfg.logs)
 	_, prevok := cfg.logs[i][m.CommandIndex-1]
 	cfg.logs[i][m.CommandIndex] = v
-	//fmt.Printf("checkLogs add new cfg.logs = %v...\n", cfg.logs)
 	if m.CommandIndex > cfg.maxIndex {
 		cfg.maxIndex = m.CommandIndex
 	}
@@ -204,7 +202,6 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	for j := 0; j < len(xlog); j++ {
 		cfg.logs[i][j] = xlog[j]
 	}
-	fmt.Printf("ingestSnap cfg.logs = %v...\n", cfg.logs)
 	cfg.lastApplied[i] = lastIncludedIndex
 	return ""
 }
@@ -252,7 +249,6 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				e := labgob.NewEncoder(w)
 				e.Encode(m.CommandIndex)
 				var xlog []interface{}
-				fmt.Printf("applierSnap cfg.logs = %v...\n", cfg.logs)
 				for j := 0; j <= m.CommandIndex; j++ {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
@@ -592,9 +588,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-				fmt.Printf("index = %v, expectedServers = %v ...\n", index,expectedServers)
 				nd, cmd1 := cfg.nCommitted(index)
-				fmt.Printf("nd = %v, cmd1 = %v , cmd = %v...\n", nd, cmd1,cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

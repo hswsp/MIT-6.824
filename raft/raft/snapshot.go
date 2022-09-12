@@ -22,25 +22,24 @@ func (rf *Raft) sendSnapShot(server int, args *InstallSnapshotRequest, reply *In
 	return ok
 }
 
-
-// installSnapshot is invoked when we get a InstallSnapshot RPC call.
+// InstallSnapShot is invoked when we get a InstallSnapshot RPC call.
 // We must be in the follower state for this, since it means we are
 // too far behind a leader for log replay. This must only be called
 // from the main thread.
-func (r *Raft) installSnapshot(req *InstallSnapshotRequest,reply *InstallSnapshotReply) {
+func (r *Raft) InstallSnapShot(req *InstallSnapshotRequest,reply *InstallSnapshotReply) {
 	// Setup a response
 	reply.Term = r.getCurrentTerm()
 	reply.Success = false
 
-	// Ignore an older term
+	// Reply immediately if term < currentTerm
 	if req.Term < r.getCurrentTerm() {
-		r.logger.Info("ignoring installSnapshot request with older term than current term",
+		r.logger.Info("ignoring InstallSnapShot request with older term than current term",
 			"request-term", req.Term, "current-term", r.getCurrentTerm())
 		return
 	}
 	lastIncludeIndex,_ :=r.getLastSnapshot()
 	if req.LastLogIndex <= lastIncludeIndex{
-		r.logger.Info("ignoring installSnapshot request with older snapshot index than current index",
+		r.logger.Info("ignoring InstallSnapShot request with older snapshot index than current index",
 			"request-index", req.LastLogIndex, "current-index", lastIncludeIndex)
 		return
 	}
@@ -55,10 +54,8 @@ func (r *Raft) installSnapshot(req *InstallSnapshotRequest,reply *InstallSnapsho
 	// Save the current leader
 	r.setLeader(req.LeaderId)
 
-	// Cut the logs after the snapshot and apply logs directly before the snapshot
-	offsetIndex := req.LastLogIndex - lastIncludeIndex
-	r.cutLogEntries(offsetIndex)
-	r.setLastSnapshot(req.LastLogIndex,req.LastLogTerm)
+	// Save snapshot file, discard any existing or partial snapshot with a smaller index
+	r.installLastSnapshot(req.LastLogIndex,req.LastLogTerm)
 
 	//reset commitIndex、lastApplied
 	if req.LastLogIndex > r.getCommitIndex() {
@@ -114,5 +111,39 @@ func (rf *Raft) leaderSendSnapShot(server int){
 	}
 
 	rf.leaderState.updateStateSuccess(server, args.LastLogIndex)
+
+}
+
+
+func (r *Raft) installLastSnapshot(lastLogIndex uint64,lastLogTerm uint64)  {
+
+	r.lastLock.Lock()
+	lastIncludeIndex := r.lastSnapshotIndex
+	r.lastLock.Unlock()
+
+	offsetIndex := int64(lastLogIndex) - int64(1 + lastIncludeIndex)
+	// last snapshot including index, so + 1.
+	cutPos := uint64(offsetIndex + 1)
+
+	r.logsLock.Lock()
+	// copy on write
+	entries :=r.logs
+	r.logger.Warn("check log array before cut","current logs",entries,"cutPos",cutPos)
+
+	//typically cutPos > originLen due to too old logs in follower
+	sLogs := make([]Log, 0)
+	originLen := uint64(len(entries))
+	if cutPos < originLen {
+		sLogs = append(sLogs,r.logs[cutPos:]...)
+	}
+	r.logs = sLogs
+	r.logger.Warn("check log array after cut","current logs",r.logs)
+	r.logsLock.Unlock()
+
+	// update lastSnapshotIndex/term
+	r.lastLock.Lock()
+	r.lastSnapshotIndex = lastLogIndex
+	r.lastSnapshotTerm = lastLogTerm
+	r.lastLock.Unlock()
 
 }
