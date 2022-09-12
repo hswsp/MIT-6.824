@@ -975,8 +975,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	atomic.StoreInt32(&rf.dead, 0)
 	rf.shutdownCh = make(chan struct{})
 
-	//if test persistent use | os.O_APPEND tag to save log of old killed rf
-	f, err := os.OpenFile(fmt.Sprintf("../log/my-raft-%d.log", me), os.O_RDWR | os.O_CREATE | os.O_APPEND , 0666) //|os.O_TRUNC
+	//if test persistent after crash, please use | os.O_APPEND tag to save log of old killed rf
+	//or use  |os.O_TRUNC
+	f, err := os.OpenFile(fmt.Sprintf("../log/my-raft-%d.log", me), os.O_RDWR | os.O_CREATE | os.O_APPEND , 0666)
 	if err != nil {
 		//log.Fatalf("error opening file: %v", err)
 		fmt.Println(err)
