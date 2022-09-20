@@ -74,7 +74,10 @@ func FileConfig(file io.Writer) Config {
 		HeartbeatTimeout:   100 * time.Millisecond,
 		ElectionTimeout:    200 * time.Millisecond,
 		CommitTimeout:      70 * time.Millisecond,
-		LeaderLeaseTimeout: 100 * time.Millisecond, // be the same as HeartbeatTimeout
+		// LeaseRead, LeaderLeaseTimeout<HeartbeatTimeout,
+		// During the lease period, we can believe that other nodes must not initiate elections,
+		// and the cluster must not have split-brain, so we can directly read the master during this time period.
+		LeaderLeaseTimeout: 100 * time.Millisecond,
 		LogLevel:           "DEBUG",
 		LocalID:            ServerID(id),
 		LogOutput:          file,
