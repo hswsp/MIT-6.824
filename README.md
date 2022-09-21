@@ -7,3 +7,5 @@ MIT [6.824 Distributed Systems](https://pdos.csail.mit.edu/6.824/schedule.html) 
 
 - [ ] Lab 3: Fault-tolerant Key/Value Service
 
+- [ ] Lab 4: Sharded Key/Value Service
+
