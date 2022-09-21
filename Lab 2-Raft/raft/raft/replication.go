@@ -134,7 +134,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.logger.Info("check index","PrevLogIndex",args.PrevLogIndex,"lastLogIndex",lastSnapshotIndex,
 		"lastSnapshotIndex",lastSnapshotIndex)
-	//Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if lastSnapshotIndex > args.PrevLogIndex || lastLogIndex < args.PrevLogIndex {
 		reply.Term = currentTerm
 		reply.Success = false
@@ -449,7 +449,7 @@ func (r *Raft) updateHeartbeatInfo(serverID int,s *followerReplication){
 	// default 0 if no LogEntries
 	prevLogTerm := uint64(0)
 	if prevLogIndex > 0 {
-		//prevLogTerm = r.getLogEntries()[prevLogIndex - 1].Term
+		// prevLogTerm = r.getLogEntries()[prevLogIndex - 1].Term
 		prevLogTerm = r.getLogTermByIndex(prevLogIndex)
 	}
 	r.logger.Debug("updateHeartbeatInfo check current rf state"," nextIndex",nextIndex," prevLogTerm",prevLogTerm)
@@ -533,13 +533,13 @@ func (r *Raft) processAppendEntries(nodeId int, rpcArg *AppendEntriesArgs) RPCSt
 		// So, it can be seen that there is no need to do special processing for ok == false
 		return OverTime
 	}
-	//since sendAppendEntries will block, we may no longer leader here here
+	// since sendAppendEntries will block, we may no longer leader here here
 	if r.getState() != Leader|| r.getCurrentTerm() != rpcArg.Term{
 		r.logger.Warn("obsolete AppendEntrie request returned!!!! we should kill current goroutine")
 		return Failure
 	}
-	//you get an AppendEntries RPC from the current leader
-	//handle reply
+	// you get an AppendEntries RPC from the current leader
+	// handle reply
 	// note here we should not use r.currentTerm
 	// since we may already changed to the follower but the heartbeat does not return !!
 	currentTerm := rpcArg.Term
@@ -586,7 +586,7 @@ func (r *Raft) processAppendEntries(nodeId int, rpcArg *AppendEntriesArgs) RPCSt
 		copy(copyMatchIndex, r.leaderState.matchIndex)
 		r.leaderState.indexLock.Unlock()
 		copyMatchIndex[r.me] = r.getLastIndex()
-		//sort and get the middle to judge the majority
+		// sort and get the middle to judge the majority
 		sort.Slice(copyMatchIndex, copyMatchIndex.Less)
 		N := copyMatchIndex[len(r.peers)/2]
 		r.logger.Debug("check returned matchIndex","copyMatchIndex",copyMatchIndex)
